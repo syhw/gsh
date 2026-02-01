@@ -30,6 +30,21 @@ pub enum ShellMessage {
         cwd: String,
         session_id: Option<String>,
         stream: bool,
+        /// Optional provider override (anthropic, openai, moonshot, ollama)
+        #[serde(default)]
+        provider: Option<String>,
+        /// Optional model override
+        #[serde(default)]
+        model: Option<String>,
+        /// Optional flow to execute
+        #[serde(default)]
+        flow: Option<String>,
+    },
+    /// List available subagents
+    ListAgents,
+    /// Kill a subagent
+    KillAgent {
+        agent_id: u64,
     },
     /// Start interactive chat session
     ChatStart {
@@ -92,8 +107,30 @@ pub enum DaemonMessage {
     ChatStarted {
         session_id: String,
     },
+    /// List of running agents
+    AgentList {
+        agents: Vec<AgentInfo>,
+    },
+    /// Agent killed confirmation
+    AgentKilled {
+        agent_id: u64,
+    },
+    /// Flow event during flow execution
+    FlowEvent {
+        event: String,
+        data: serde_json::Value,
+    },
     /// Shutdown acknowledgment
     ShuttingDown,
+}
+
+/// Information about a running agent
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentInfo {
+    pub agent_id: u64,
+    pub session_name: String,
+    pub task: Option<String>,
+    pub cwd: Option<String>,
 }
 
 /// A complete request-response pair for the protocol

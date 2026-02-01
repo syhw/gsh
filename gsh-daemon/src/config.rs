@@ -27,13 +27,17 @@ pub struct DaemonConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// Default provider (anthropic, openai)
+    /// Default provider (anthropic, openai, moonshot, ollama)
     #[serde(default = "default_provider")]
     pub default_provider: String,
     #[serde(default)]
     pub anthropic: AnthropicConfig,
     #[serde(default)]
     pub openai: OpenAIConfig,
+    #[serde(default)]
+    pub moonshot: MoonshotConfig,
+    #[serde(default)]
+    pub ollama: OllamaConfig,
     /// Maximum tokens in response
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -59,6 +63,35 @@ pub struct OpenAIConfig {
     pub model: String,
     /// Base URL (for OpenAI-compatible APIs)
     pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MoonshotConfig {
+    /// API key (can also use MOONSHOT_API_KEY env var)
+    pub api_key: Option<String>,
+    /// Model to use
+    #[serde(default = "default_moonshot_model")]
+    pub model: String,
+    /// Base URL
+    pub base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OllamaConfig {
+    /// Model to use
+    #[serde(default = "default_ollama_model")]
+    pub model: String,
+    /// Base URL (default: http://localhost:11434)
+    pub base_url: Option<String>,
+}
+
+impl Default for OllamaConfig {
+    fn default() -> Self {
+        Self {
+            model: default_ollama_model(),
+            base_url: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +156,14 @@ fn default_openai_model() -> String {
     "gpt-4o".to_string()
 }
 
+fn default_moonshot_model() -> String {
+    "moonshot-v1-128k".to_string()
+}
+
+fn default_ollama_model() -> String {
+    "llama3.2".to_string()
+}
+
 fn default_max_events() -> usize {
     100
 }
@@ -166,6 +207,8 @@ impl Default for LlmConfig {
             default_provider: default_provider(),
             anthropic: AnthropicConfig::default(),
             openai: OpenAIConfig::default(),
+            moonshot: MoonshotConfig::default(),
+            ollama: OllamaConfig::default(),
             max_tokens: default_max_tokens(),
             system_prompt: None,
         }
@@ -260,5 +303,14 @@ impl Config {
             .api_key
             .clone()
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+    }
+
+    /// Get API key for Moonshot (config or env var)
+    pub fn moonshot_api_key(&self) -> Option<String> {
+        self.llm
+            .moonshot
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("MOONSHOT_API_KEY").ok())
     }
 }

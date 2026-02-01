@@ -1,5 +1,6 @@
 use super::{
-    ChatMessage, ChatRole, ContentBlock, MessageContent, Provider, StreamEvent, ToolDefinition,
+    ChatMessage, ChatResponse, ChatRole, ContentBlock, MessageContent, Provider,
+    ProviderCapabilities, ProviderError, StreamEvent, ToolDefinition, UsageStats,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -11,10 +12,36 @@ use futures_util::StreamExt;
 
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 
+/// Anthropic Claude API provider
 pub struct AnthropicProvider {
     client: Client,
     api_key: String,
     model: String,
+}
+
+/// Model capability information for Anthropic models
+fn get_model_capabilities(model: &str) -> ProviderCapabilities {
+    // Context windows and capabilities for known Anthropic models
+    // as of early 2025
+    let (context_tokens, output_tokens) = if model.contains("opus") {
+        (200_000, 4_096)
+    } else if model.contains("sonnet") {
+        (200_000, 8_192)
+    } else if model.contains("haiku") {
+        (200_000, 4_096)
+    } else {
+        // Default for unknown models
+        (100_000, 4_096)
+    };
+
+    ProviderCapabilities {
+        supports_tools: true,
+        supports_streaming: true,
+        supports_system_message: true,
+        supports_vision: true, // Claude 3+ supports vision
+        max_context_tokens: Some(context_tokens),
+        max_output_tokens: Some(output_tokens),
+    }
 }
 
 impl AnthropicProvider {
@@ -73,6 +100,65 @@ struct AnthropicTool {
 struct AnthropicResponse {
     content: Vec<AnthropicContentBlock>,
     stop_reason: Option<String>,
+    model: Option<String>,
+    usage: Option<AnthropicUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+}
+
+impl From<AnthropicUsage> for UsageStats {
+    fn from(usage: AnthropicUsage) -> Self {
+        UsageStats {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            total_tokens: usage.input_tokens + usage.output_tokens,
+            cache_read_tokens: usage.cache_read_input_tokens,
+            cache_creation_tokens: usage.cache_creation_input_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicError {
+    #[serde(rename = "type")]
+    error_type: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AnthropicErrorResponse {
+    error: AnthropicError,
+}
+
+impl AnthropicErrorResponse {
+    fn into_provider_error(self, status_code: u16) -> ProviderError {
+        let msg = self.error.message;
+        match (status_code, self.error.error_type.as_str()) {
+            (401, _) => ProviderError::AuthenticationError(msg),
+            (429, _) => ProviderError::RateLimitError {
+                message: msg,
+                retry_after_secs: None, // Could parse from headers
+            },
+            (400, "invalid_request_error") => ProviderError::InvalidRequestError(msg),
+            (404, _) => ProviderError::ModelNotFoundError(msg),
+            (400, _) if msg.contains("context") || msg.contains("token") => {
+                ProviderError::ContextLengthExceededError {
+                    message: msg,
+                    max_tokens: None,
+                }
+            }
+            (500..=599, _) => ProviderError::ServiceError(msg),
+            _ => ProviderError::Other(msg),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -164,6 +250,14 @@ impl Provider for AnthropicProvider {
         "anthropic"
     }
 
+    fn model(&self) -> &str {
+        &self.model
+    }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        get_model_capabilities(&self.model)
+    }
+
     async fn chat(
         &self,
         messages: Vec<ChatMessage>,
@@ -171,6 +265,17 @@ impl Provider for AnthropicProvider {
         tools: Option<&[ToolDefinition]>,
         max_tokens: u32,
     ) -> Result<ChatMessage> {
+        let response = self.chat_with_usage(messages, system, tools, max_tokens).await?;
+        Ok(response.message)
+    }
+
+    async fn chat_with_usage(
+        &self,
+        messages: Vec<ChatMessage>,
+        system: Option<&str>,
+        tools: Option<&[ToolDefinition]>,
+        max_tokens: u32,
+    ) -> Result<ChatResponse> {
         let request = AnthropicRequest {
             model: self.model.clone(),
             max_tokens,
@@ -191,9 +296,17 @@ impl Provider for AnthropicProvider {
             .await
             .context("Failed to send request to Anthropic")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        let status = response.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
             let body = response.text().await.unwrap_or_default();
+
+            // Try to parse structured error
+            if let Ok(error_resp) = serde_json::from_str::<AnthropicErrorResponse>(&body) {
+                let provider_error = error_resp.into_provider_error(status_code);
+                anyhow::bail!("{}", provider_error);
+            }
+
             anyhow::bail!("Anthropic API error {}: {}", status, body);
         }
 
@@ -204,9 +317,16 @@ impl Provider for AnthropicProvider {
 
         let content_blocks: Vec<ContentBlock> = response.content.into_iter().map(|b| b.into()).collect();
 
-        Ok(ChatMessage {
+        let message = ChatMessage {
             role: ChatRole::Assistant,
             content: MessageContent::Blocks(content_blocks),
+        };
+
+        Ok(ChatResponse {
+            message,
+            usage: response.usage.map(|u| u.into()),
+            stop_reason: response.stop_reason,
+            model: response.model,
         })
     }
 
@@ -267,7 +387,10 @@ impl Provider for AnthropicProvider {
                             buffer.push_str(&String::from_utf8_lossy(&chunk));
                         }
                         Some(Err(e)) => {
-                            return Some((StreamEvent::Error(e.to_string()), (stream, buffer)));
+                            return Some((
+                                StreamEvent::Error(ProviderError::NetworkError(e.to_string())),
+                                (stream, buffer),
+                            ));
                         }
                         None => {
                             return None;
@@ -279,8 +402,15 @@ impl Provider for AnthropicProvider {
 
         Ok(Box::pin(event_stream))
     }
+
+    fn estimate_tokens(&self, text: &str) -> u64 {
+        // Claude uses a tokenizer similar to GPT, roughly 4 chars per token
+        // This is a rough estimate; for accurate counts, use the Anthropic tokenizer
+        (text.len() as u64 + 3) / 4
+    }
 }
 
+/// Parse an SSE event string into a StreamEvent
 fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
     let mut event_type = None;
     let mut data = None;
@@ -317,9 +447,39 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
             }
             None
         }
-        Some("message_stop") => Some(StreamEvent::MessageComplete),
+        Some("message_stop") => Some(StreamEvent::MessageComplete {
+            usage: None,
+            stop_reason: None,
+        }),
+        Some("message_delta") => {
+            // Parse final usage and stop_reason from message_delta
+            if let Ok(event) = serde_json::from_str::<serde_json::Value>(&data) {
+                let stop_reason = event
+                    .get("delta")
+                    .and_then(|d| d.get("stop_reason"))
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+
+                let usage = event.get("usage").and_then(|u| {
+                    let input = u.get("input_tokens")?.as_u64()?;
+                    let output = u.get("output_tokens")?.as_u64()?;
+                    Some(UsageStats::new(input, output))
+                });
+
+                if stop_reason.is_some() || usage.is_some() {
+                    return Some(StreamEvent::MessageComplete { usage, stop_reason });
+                }
+            }
+            None
+        }
         Some("error") => {
-            Some(StreamEvent::Error(data))
+            // Try to parse structured error
+            if let Ok(error_resp) = serde_json::from_str::<AnthropicErrorResponse>(&data) {
+                return Some(StreamEvent::Error(
+                    error_resp.into_provider_error(400), // Default to 400 for stream errors
+                ));
+            }
+            Some(StreamEvent::Error(ProviderError::Other(data)))
         }
         _ => None,
     }

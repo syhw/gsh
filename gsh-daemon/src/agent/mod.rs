@@ -147,7 +147,7 @@ Guidelines:
                     StreamEvent::ToolUseInputDelta(json) => {
                         current_tool_input.push_str(&json);
                     }
-                    StreamEvent::MessageComplete => {
+                    StreamEvent::MessageComplete { usage: _, stop_reason: _ } => {
                         // Save last tool's input
                         if let Some(idx) = current_tool_idx {
                             tool_uses[idx].2 = std::mem::take(&mut current_tool_input);
@@ -155,8 +155,9 @@ Guidelines:
                         break;
                     }
                     StreamEvent::Error(e) => {
-                        let _ = event_tx.send(AgentEvent::Error(e.clone())).await;
-                        anyhow::bail!("Stream error: {}", e);
+                        let error_msg = e.to_string();
+                        let _ = event_tx.send(AgentEvent::Error(error_msg.clone())).await;
+                        anyhow::bail!("Stream error: {}", error_msg);
                     }
                 }
             }

@@ -1,6 +1,7 @@
 mod agent;
 mod config;
 mod context;
+mod flow;
 mod protocol;
 mod provider;
 mod session;
@@ -212,18 +213,24 @@ async fn process_message(
             Ok(Some(DaemonMessage::Ack))
         }
 
-        ShellMessage::Prompt { query, cwd, session_id, stream } => {
+        ShellMessage::Prompt { query, cwd, session_id, stream, provider: provider_override, model: model_override, flow: flow_name } => {
             // Get shell context
             let context = {
                 let ctx = state.context.read().await;
                 ctx.generate_context(state.config.context.max_context_chars)
             };
 
-            // Create provider
-            let provider = provider::create_provider(
-                &state.config.llm.default_provider,
-                &state.config,
-            )?;
+            // Determine provider name
+            let provider_name = provider_override
+                .as_deref()
+                .unwrap_or(&state.config.llm.default_provider);
+
+            // Create provider (with optional model override)
+            let provider = if let Some(model) = model_override {
+                provider::create_provider_with_model(provider_name, &model, &state.config)?
+            } else {
+                provider::create_provider(provider_name, &state.config)?
+            };
 
             // Create agent
             let agent = agent::Agent::new(provider, &state.config, cwd.clone());
@@ -286,6 +293,26 @@ async fn process_message(
             }
 
             Ok(None)
+        }
+
+        ShellMessage::ListAgents => {
+            let tmux_manager = tmux::TmuxManager::new();
+            let agents = tmux_manager.list_subagents().unwrap_or_default();
+            let agent_infos: Vec<protocol::AgentInfo> = agents.into_iter().map(|a| {
+                protocol::AgentInfo {
+                    agent_id: a.agent_id,
+                    session_name: a.session_name,
+                    task: a.task,
+                    cwd: a.cwd,
+                }
+            }).collect();
+            Ok(Some(DaemonMessage::AgentList { agents: agent_infos }))
+        }
+
+        ShellMessage::KillAgent { agent_id } => {
+            let tmux_manager = tmux::TmuxManager::new();
+            tmux_manager.kill_agent(agent_id)?;
+            Ok(Some(DaemonMessage::AgentKilled { agent_id }))
         }
 
         ShellMessage::ChatStart { cwd, session_id } => {

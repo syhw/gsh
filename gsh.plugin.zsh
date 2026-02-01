@@ -104,6 +104,9 @@ _gsh_chpwd() {
 #        llm - < prompt.txt                     (read from file)
 #        echo "prompt" | llm                    (read from pipe)
 #        llm chat                               (interactive mode)
+#        llm --provider openai "use GPT"        (provider override)
+#        llm --model claude-opus "complex task" (model override)
+#        llm --flow code-review "review code"   (run a flow)
 llm() {
     if ! command -v "$GSH_CLI_BIN" &>/dev/null; then
         echo "Error: gsh CLI not found. Install it with: cargo install --path gsh-cli"
@@ -121,6 +124,11 @@ llm() {
         echo "       echo 'prompt' | llm      (read from pipe)"
         echo "       llm chat                 (interactive mode)"
         echo "       llm status               (daemon status)"
+        echo ""
+        echo "Options:"
+        echo "       --provider <name>        (anthropic, openai, moonshot, ollama)"
+        echo "       --model <model>          (model override)"
+        echo "       --flow <flow-name>       (run a flow)"
         return 1
     fi
 
@@ -135,6 +143,10 @@ llm() {
         stop)
             "$GSH_CLI_BIN" stop
             ;;
+        agents)
+            shift
+            gsh-agents "$@"
+            ;;
         -)
             # Explicit stdin read
             shift
@@ -144,6 +156,115 @@ llm() {
             "$GSH_CLI_BIN" "$@"
             ;;
     esac
+}
+
+# List running subagents
+gsh-agents() {
+    if [[ ! -S "$GSH_SOCKET" ]]; then
+        echo "Error: gsh daemon not running"
+        return 1
+    fi
+
+    local response
+    if command -v socat &>/dev/null; then
+        response=$(echo '{"type":"list_agents"}' | socat -t2 - "UNIX-CONNECT:$GSH_SOCKET" 2>/dev/null)
+    elif command -v nc &>/dev/null; then
+        response=$(echo '{"type":"list_agents"}' | nc -U "$GSH_SOCKET" 2>/dev/null)
+    else
+        echo "Error: socat or nc required"
+        return 1
+    fi
+
+    if [[ -z "$response" ]]; then
+        echo "No running agents"
+        return 0
+    fi
+
+    echo "$response" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    if data.get('type') == 'agent_list':
+        agents = data.get('agents', [])
+        if not agents:
+            print('No running agents')
+        else:
+            print(f'Running agents ({len(agents)}):')
+            for a in agents:
+                task = a.get('task', 'unknown')[:40]
+                print(f\"  [{a['agent_id']:04d}] {a['session_name']} - {task}\")
+    elif data.get('type') == 'error':
+        print(f\"Error: {data.get('message', 'unknown')}\")
+except Exception as e:
+    print(f'Parse error: {e}')
+" 2>/dev/null || echo "$response"
+}
+
+# Attach to a subagent's tmux session
+gsh-attach() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: gsh-attach <agent-id or session-name>"
+        return 1
+    fi
+
+    local target="$1"
+
+    # If it's a number, convert to session name
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        target="gsh-agent-$(printf '%04d' "$target")"
+    fi
+
+    if tmux has-session -t "$target" 2>/dev/null; then
+        tmux attach-session -t "$target"
+    else
+        echo "Session not found: $target"
+        echo "Available gsh sessions:"
+        tmux list-sessions 2>/dev/null | grep "^gsh-" || echo "  (none)"
+        return 1
+    fi
+}
+
+# Tail a subagent's output
+gsh-logs() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: gsh-logs <agent-id or session-name>"
+        return 1
+    fi
+
+    local target="$1"
+
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        target="gsh-agent-$(printf '%04d' "$target")"
+    fi
+
+    if tmux has-session -t "$target" 2>/dev/null; then
+        tmux capture-pane -t "$target" -p -S -
+    else
+        echo "Session not found: $target"
+        return 1
+    fi
+}
+
+# Kill a subagent
+gsh-kill() {
+    if [[ -z "$1" ]]; then
+        echo "Usage: gsh-kill <agent-id>"
+        return 1
+    fi
+
+    local agent_id="$1"
+
+    if [[ ! -S "$GSH_SOCKET" ]]; then
+        echo "Error: gsh daemon not running"
+        return 1
+    fi
+
+    local response
+    if command -v socat &>/dev/null; then
+        response=$(echo "{\"type\":\"kill_agent\",\"agent_id\":$agent_id}" | socat -t2 - "UNIX-CONNECT:$GSH_SOCKET" 2>/dev/null)
+    fi
+
+    echo "Sent kill request for agent $agent_id"
 }
 
 # Alias gsh to the CLI binary

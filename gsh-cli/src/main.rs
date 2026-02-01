@@ -16,6 +16,18 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
+    /// LLM provider (anthropic, openai, moonshot, ollama)
+    #[arg(long, short = 'p', global = true)]
+    provider: Option<String>,
+
+    /// Model to use (overrides provider default)
+    #[arg(long, short = 'm', global = true)]
+    model: Option<String>,
+
+    /// Run a flow instead of single agent
+    #[arg(long, short = 'f', global = true)]
+    flow: Option<String>,
+
     /// One-shot prompt (shorthand for `gsh prompt "..."`)
     #[arg(trailing_var_arg = true)]
     query: Vec<String>,
@@ -37,6 +49,8 @@ enum Commands {
         #[arg(long)]
         session: Option<String>,
     },
+    /// List running subagents
+    Agents,
     /// Check daemon status
     Status,
     /// Stop the daemon
@@ -52,6 +66,12 @@ enum ShellMessage {
         cwd: String,
         session_id: Option<String>,
         stream: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        flow: Option<String>,
     },
     ChatStart {
         cwd: String,
@@ -64,6 +84,7 @@ enum ShellMessage {
     ChatEnd {
         session_id: String,
     },
+    ListAgents,
     Ping,
     Shutdown,
 }
@@ -79,7 +100,16 @@ enum DaemonMessage {
     Response { text: String, session_id: String },
     Error { message: String, code: Option<String> },
     ChatStarted { session_id: String },
+    AgentList { agents: Vec<AgentInfo> },
     ShuttingDown,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentInfo {
+    agent_id: u64,
+    session_name: String,
+    task: Option<String>,
+    cwd: Option<String>,
 }
 
 fn get_socket_path() -> PathBuf {
@@ -100,16 +130,19 @@ async fn main() -> Result<()> {
     // Handle one-shot query without subcommand
     if !cli.query.is_empty() {
         let query = get_query_from_args_or_stdin(&cli.query)?;
-        return run_prompt(&query, true).await;
+        return run_prompt(&query, true, cli.provider, cli.model, cli.flow).await;
     }
 
     match cli.command {
         Some(Commands::Prompt { query, no_stream }) => {
             let query = get_query_from_args_or_stdin(&query)?;
-            run_prompt(&query, !no_stream).await
+            run_prompt(&query, !no_stream, cli.provider, cli.model, cli.flow).await
         }
         Some(Commands::Chat { session }) => {
             run_chat(session).await
+        }
+        Some(Commands::Agents) => {
+            run_agents().await
         }
         Some(Commands::Status) => {
             run_status().await
@@ -124,7 +157,7 @@ async fn main() -> Result<()> {
                 // Read from stdin
                 let query = read_stdin()?;
                 if !query.is_empty() {
-                    return run_prompt(&query, true).await;
+                    return run_prompt(&query, true, cli.provider, cli.model, cli.flow).await;
                 }
             }
 
@@ -135,8 +168,14 @@ async fn main() -> Result<()> {
             println!("       echo 'prompt' | gsh      Read prompt from stdin");
             println!("       gsh - < file.txt         Read prompt from file");
             println!("       gsh chat                 Start interactive chat");
+            println!("       gsh agents               List running subagents");
             println!("       gsh status               Check daemon status");
             println!("       gsh stop                 Stop the daemon");
+            println!();
+            println!("Options:");
+            println!("       -p, --provider <name>    LLM provider (anthropic, openai, moonshot, ollama)");
+            println!("       -m, --model <model>      Model override");
+            println!("       -f, --flow <name>        Run a flow");
             println!();
             println!("Run 'gsh --help' for more options");
             Ok(())
@@ -183,7 +222,13 @@ async fn connect() -> Result<UnixStream> {
         })
 }
 
-async fn run_prompt(query: &str, stream: bool) -> Result<()> {
+async fn run_prompt(
+    query: &str,
+    stream: bool,
+    provider: Option<String>,
+    model: Option<String>,
+    flow: Option<String>,
+) -> Result<()> {
     let stream_conn = connect().await?;
     let (reader, mut writer) = stream_conn.into_split();
     let mut reader = BufReader::new(reader);
@@ -193,6 +238,9 @@ async fn run_prompt(query: &str, stream: bool) -> Result<()> {
         cwd: get_cwd(),
         session_id: None,
         stream,
+        provider,
+        model,
+        flow,
     };
 
     let msg_str = serde_json::to_string(&msg)? + "\n";
@@ -354,6 +402,44 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
     writer.write_all(msg_str.as_bytes()).await?;
 
     println!("Chat session ended.");
+    Ok(())
+}
+
+async fn run_agents() -> Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let msg = ShellMessage::ListAgents;
+    let msg_str = serde_json::to_string(&msg)? + "\n";
+    writer.write_all(msg_str.as_bytes()).await?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    let response: DaemonMessage = serde_json::from_str(line.trim())?;
+
+    match response {
+        DaemonMessage::AgentList { agents } => {
+            if agents.is_empty() {
+                println!("No running agents");
+            } else {
+                println!("Running agents ({}):", agents.len());
+                for agent in agents {
+                    let task = agent.task.as_deref().unwrap_or("unknown");
+                    let task_display: String = task.chars().take(40).collect();
+                    println!("  [{:04}] {} - {}", agent.agent_id, agent.session_name, task_display);
+                }
+            }
+        }
+        DaemonMessage::Error { message, .. } => {
+            eprintln!("Error: {}", message);
+        }
+        _ => {
+            eprintln!("Unexpected response");
+        }
+    }
+
     Ok(())
 }
 

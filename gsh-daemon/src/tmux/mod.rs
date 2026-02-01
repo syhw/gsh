@@ -1,12 +1,26 @@
+//! Tmux integration for gsh daemon
+//!
+//! This module provides functionality for managing tmux sessions,
+//! particularly for spawning and managing subagent sessions.
+
+pub mod manager;
+
+// Re-export main types for convenience
+pub use manager::{AgentHandle, AgentSessionConfig, SubagentInfo, TmuxManager};
+
 use anyhow::{Context, Result};
 use std::process::Command;
 
-/// Tmux integration for spawning and managing sessions
-pub struct TmuxManager {
+/// Legacy TmuxManager for basic session operations
+///
+/// This is maintained for backward compatibility. For new code,
+/// prefer using `manager::TmuxManager` which provides more comprehensive
+/// subagent lifecycle management.
+pub struct BasicTmuxManager {
     session_prefix: String,
 }
 
-impl TmuxManager {
+impl BasicTmuxManager {
     pub fn new() -> Self {
         Self {
             session_prefix: "gsh".to_string(),
@@ -161,7 +175,7 @@ impl TmuxManager {
     }
 }
 
-impl Default for TmuxManager {
+impl Default for BasicTmuxManager {
     fn default() -> Self {
         Self::new()
     }
