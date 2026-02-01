@@ -1,0 +1,72 @@
+# gsh Configuration Example
+# Copy this file to ~/.config/gsh/config.toml and customize as needed
+
+[daemon]
+# Socket path (default: /tmp/gsh-$USER.sock)
+# socket_path = "/tmp/gsh.sock"
+
+# Log level: trace, debug, info, warn, error
+log_level = "info"
+
+# Log file (default: stderr)
+# log_file = "~/.local/share/gsh/daemon.log"
+
+[llm]
+# Default provider: anthropic, openai
+default_provider = "anthropic"
+
+# Maximum tokens in response
+max_tokens = 4096
+
+# Custom system prompt (optional)
+# system_prompt = """
+# You are a helpful shell assistant. Be concise and direct.
+# """
+
+[llm.anthropic]
+# API key (can also use ANTHROPIC_API_KEY environment variable)
+# api_key = "sk-ant-..."
+
+# Model to use
+model = "claude-sonnet-4-20250514"
+
+[llm.openai]
+# API key (can also use OPENAI_API_KEY environment variable)
+# api_key = "sk-..."
+
+# Model to use
+model = "gpt-4o"
+
+# Base URL (for OpenAI-compatible APIs like Ollama, vLLM, etc.)
+# base_url = "http://localhost:8000/v1/chat/completions"
+
+[context]
+# Maximum number of shell events to keep in context
+max_events = 100
+
+# Maximum context length in characters
+max_context_chars = 50000
+
+# Include command outputs in context (if captured)
+include_outputs = true
+
+[tools]
+# Enable/disable individual tools
+bash_enabled = true
+read_enabled = true
+write_enabled = true
+edit_enabled = true
+glob_enabled = true
+grep_enabled = true
+
+# Paths to exclude from file operations (substrings)
+excluded_paths = [
+    ".git/objects",
+    "node_modules",
+    ".venv",
+    "__pycache__",
+    ".cargo/registry",
+]
+
+# Maximum file size to read (bytes)
+max_file_size = 1048576  # 1MB
