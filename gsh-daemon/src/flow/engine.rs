@@ -3,18 +3,18 @@
 //! Executes multi-agent flows by orchestrating agents across tmux sessions,
 //! handling conditional routing, parallel execution, and context passing.
 
-use super::{Flow, FlowValidationError, NextNode};
+use super::{Flow, NextNode};
 use crate::agent::{Agent, AgentEvent};
 use crate::config::Config;
-use crate::provider::{self, ChatMessage, ChatRole, MessageContent};
+use crate::provider::{self};
 use crate::tmux::{AgentSessionConfig, TmuxManager};
-use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 /// Events emitted during flow execution
 #[derive(Debug, Clone, Serialize)]
@@ -340,7 +340,7 @@ impl FlowEngine {
             NextNode::Single(next_id) => {
                 self.execute_node(flow, next_id, ctx, event_tx).await
             }
-            NextNode::Conditional { branches } => {
+            NextNode::Conditional { branches: _ } => {
                 if let Some(next_id) = next_node_id {
                     self.execute_node(flow, &next_id, ctx, event_tx).await
                 } else {
@@ -388,7 +388,7 @@ impl FlowEngine {
                     model_overrides,
                 };
 
-                let node = flow_clone.get_node(&node_id_clone)
+                let _node = flow_clone.get_node(&node_id_clone)
                     .ok_or_else(|| anyhow::anyhow!("Node not found: {}", node_id_clone))?;
 
                 // Build prompt

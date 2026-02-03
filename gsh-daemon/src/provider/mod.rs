@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod moonshot;
 pub mod ollama;
 pub mod openai;
+pub mod zhipu;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -472,6 +473,16 @@ pub fn create_provider(
                 config.llm.ollama.base_url.clone(),
             )))
         }
+        "z" | "zai" => {
+            let api_key = config
+                .zhipu_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Z API key not configured (set ZAI_API_KEY)"))?;
+            Ok(Box::new(zhipu::ZhipuProvider::new(
+                api_key,
+                config.llm.zhipu.model.clone(),
+                config.llm.zhipu.base_url.clone(),
+            )))
+        }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),
     }
 }
@@ -516,6 +527,16 @@ pub fn create_provider_with_model(
             Ok(Box::new(ollama::OllamaProvider::new(
                 model.to_string(),
                 config.llm.ollama.base_url.clone(),
+            )))
+        }
+        "z" | "zai" => {
+            let api_key = config
+                .zhipu_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Z API key not configured (set ZAI_API_KEY)"))?;
+            Ok(Box::new(zhipu::ZhipuProvider::new(
+                api_key,
+                model.to_string(),
+                config.llm.zhipu.base_url.clone(),
             )))
         }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),

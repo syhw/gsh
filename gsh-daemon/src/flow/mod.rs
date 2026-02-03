@@ -6,8 +6,6 @@
 mod engine;
 mod parser;
 
-pub use engine::{FlowContext, FlowEngine, FlowEvent, NodeResult};
-pub use parser::{parse_flow, parse_flow_file, FlowParseError};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -261,7 +259,7 @@ impl Flow {
     }
 
     fn check_no_cycles(&self) -> Result<(), FlowValidationError> {
-        use std::collections::HashSet;
+        
 
         // Use DFS with coloring: White (unvisited), Gray (visiting), Black (visited)
         #[derive(Clone, Copy, PartialEq)]

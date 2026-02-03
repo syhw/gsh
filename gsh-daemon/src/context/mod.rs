@@ -1,3 +1,3 @@
 mod accumulator;
 
-pub use accumulator::{ContextAccumulator, ShellEvent};
+pub use accumulator::ContextAccumulator;

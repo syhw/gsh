@@ -27,7 +27,7 @@ pub struct DaemonConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// Default provider (anthropic, openai, moonshot, ollama)
+    /// Default provider (anthropic, openai, moonshot, ollama, zhipu)
     #[serde(default = "default_provider")]
     pub default_provider: String,
     #[serde(default)]
@@ -38,6 +38,8 @@ pub struct LlmConfig {
     pub moonshot: MoonshotConfig,
     #[serde(default)]
     pub ollama: OllamaConfig,
+    #[serde(default)]
+    pub zhipu: ZhipuConfig,
     /// Maximum tokens in response
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -89,6 +91,27 @@ impl Default for OllamaConfig {
     fn default() -> Self {
         Self {
             model: default_ollama_model(),
+            base_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ZhipuConfig {
+    /// API key (can also use ZAI_API_KEY env var)
+    pub api_key: Option<String>,
+    /// Model to use
+    #[serde(default = "default_zhipu_model")]
+    pub model: String,
+    /// Base URL
+    pub base_url: Option<String>,
+}
+
+impl Default for ZhipuConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            model: default_zhipu_model(),
             base_url: None,
         }
     }
@@ -164,6 +187,10 @@ fn default_ollama_model() -> String {
     "llama3.2".to_string()
 }
 
+fn default_zhipu_model() -> String {
+    "GLM-4.7".to_string()
+}
+
 fn default_max_events() -> usize {
     100
 }
@@ -209,6 +236,7 @@ impl Default for LlmConfig {
             openai: OpenAIConfig::default(),
             moonshot: MoonshotConfig::default(),
             ollama: OllamaConfig::default(),
+            zhipu: ZhipuConfig::default(),
             max_tokens: default_max_tokens(),
             system_prompt: None,
         }
@@ -312,5 +340,14 @@ impl Config {
             .api_key
             .clone()
             .or_else(|| std::env::var("MOONSHOT_API_KEY").ok())
+    }
+
+    /// Get API key for Zhipu (config or env var)
+    pub fn zhipu_api_key(&self) -> Option<String> {
+        self.llm
+            .zhipu
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("ZAI_API_KEY").ok())
     }
 }

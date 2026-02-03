@@ -114,7 +114,7 @@ Guidelines:
 
         for _ in 0..self.max_iterations {
             // Call the LLM with streaming
-            let mut stream = self
+            let stream_result = self
                 .provider
                 .chat_stream(
                     messages.clone(),
@@ -122,7 +122,16 @@ Guidelines:
                     Some(&tools),
                     self.max_tokens,
                 )
-                .await?;
+                .await;
+
+            let mut stream = match stream_result {
+                Ok(s) => s,
+                Err(e) => {
+                    let error_msg = e.to_string();
+                    let _ = event_tx.send(AgentEvent::Error(error_msg.clone())).await;
+                    anyhow::bail!("{}", error_msg);
+                }
+            };
 
             let mut response_text = String::new();
             let mut tool_uses: Vec<(String, String, String)> = Vec::new(); // (id, name, input_json)

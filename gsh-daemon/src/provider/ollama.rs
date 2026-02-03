@@ -13,7 +13,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use futures_util::StreamExt;
-use tracing::{debug, warn};
 
 const DEFAULT_API_URL: &str = "http://localhost:11434";
 
@@ -149,7 +148,7 @@ fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<Ollam
         // Handle tool results as separate messages
         if let MessageContent::Blocks(blocks) = &msg.content {
             for block in blocks {
-                if let ContentBlock::ToolResult { tool_use_id, content, .. } = block {
+                if let ContentBlock::ToolResult { tool_use_id: _, content, .. } = block {
                     result.push(OllamaMessage {
                         role: "tool".to_string(),
                         content: content.clone(),

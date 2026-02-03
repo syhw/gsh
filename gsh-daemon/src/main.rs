@@ -213,7 +213,7 @@ async fn process_message(
             Ok(Some(DaemonMessage::Ack))
         }
 
-        ShellMessage::Prompt { query, cwd, session_id, stream, provider: provider_override, model: model_override, flow: flow_name } => {
+        ShellMessage::Prompt { query, cwd, session_id, stream, provider: provider_override, model: model_override, flow: _flow_name } => {
             // Get shell context
             let context = {
                 let ctx = state.context.read().await;
@@ -245,6 +245,7 @@ async fn process_message(
 
             // Stream events to client
             let mut final_text = String::new();
+            let mut had_error = false;
             while let Some(event) = event_rx.recv().await {
                 let msg = match event {
                     agent::AgentEvent::TextChunk(text) => {
@@ -270,6 +271,7 @@ async fn process_message(
                         }
                     }
                     agent::AgentEvent::Error(e) => {
+                        had_error = true;
                         Some(DaemonMessage::Error { message: e, code: None })
                     }
                 };
@@ -283,8 +285,8 @@ async fn process_message(
             // Wait for agent to finish
             let _ = agent_handle.await?;
 
-            // If not streaming, send final response
-            if !stream {
+            // If not streaming and no error, send final response
+            if !stream && !had_error {
                 let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 return Ok(Some(DaemonMessage::Response {
                     text: final_text,

@@ -6,7 +6,7 @@
 pub mod manager;
 
 // Re-export main types for convenience
-pub use manager::{AgentHandle, AgentSessionConfig, SubagentInfo, TmuxManager};
+pub use manager::{AgentSessionConfig, TmuxManager};
 
 use anyhow::{Context, Result};
 use std::process::Command;

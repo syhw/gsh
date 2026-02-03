@@ -1,6 +1,6 @@
-//! Moonshot AI provider (Kimi K2.5)
+//! Zhipu AI provider (GLM models)
 //!
-//! Supports the Kimi K2.5 model with swarm capabilities for parallel agent execution.
+//! Supports GLM-4 and other Zhipu models via OpenAI-compatible API.
 
 use super::{
     ChatMessage, ChatResponse, ChatRole, ContentBlock, MessageContent, Provider,
@@ -14,17 +14,17 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 use futures_util::StreamExt;
 
-const DEFAULT_API_URL: &str = "https://api.moonshot.cn/v1/chat/completions";
+const DEFAULT_API_URL: &str = "https://api.z.ai/api/coding/paas/v4/chat/completions";
 
-/// Moonshot AI provider (Kimi)
-pub struct MoonshotProvider {
+/// Zhipu AI provider (GLM)
+pub struct ZhipuProvider {
     client: Client,
     api_key: String,
     model: String,
     base_url: String,
 }
 
-impl MoonshotProvider {
+impl ZhipuProvider {
     pub fn new(api_key: String, model: String, base_url: Option<String>) -> Self {
         Self {
             client: Client::new(),
@@ -36,13 +36,12 @@ impl MoonshotProvider {
 }
 
 fn get_model_capabilities(model: &str) -> ProviderCapabilities {
-    // Kimi K2.5 capabilities
-    let (context_tokens, output_tokens, supports_vision) = if model.contains("k2") {
-        (200_000, 32_768, true) // Kimi K2.5 has large context
-    } else if model.contains("moonshot-v1-128k") {
-        (128_000, 8_192, false)
-    } else if model.contains("moonshot-v1-32k") {
-        (32_000, 8_192, false)
+    // GLM model capabilities (case-insensitive check)
+    let model_lower = model.to_lowercase();
+    let (context_tokens, output_tokens, supports_vision) = if model_lower.contains("glm-4") {
+        (128_000, 8_192, model_lower.contains("v") || model_lower.contains("vision"))
+    } else if model_lower.contains("glm-3") {
+        (8_192, 4_096, false)
     } else {
         (8_192, 4_096, false)
     };
@@ -57,14 +56,15 @@ fn get_model_capabilities(model: &str) -> ProviderCapabilities {
     }
 }
 
-// Moonshot uses OpenAI-compatible API format
+// Zhipu uses OpenAI-compatible API format
 #[derive(Debug, Serialize)]
-struct MoonshotRequest {
+struct ZhipuRequest {
     model: String,
-    messages: Vec<MoonshotMessage>,
-    max_tokens: u32,
+    messages: Vec<ZhipuMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<MoonshotTool>>,
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<ZhipuTool>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -72,60 +72,71 @@ struct MoonshotRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct MoonshotMessage {
+struct ZhipuMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<MoonshotToolCall>>,
+    tool_calls: Option<Vec<ZhipuToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct MoonshotToolCall {
+struct ZhipuToolCall {
     id: String,
     #[serde(rename = "type")]
     call_type: String,
-    function: MoonshotFunctionCall,
+    function: ZhipuFunctionCall,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-struct MoonshotFunctionCall {
+struct ZhipuFunctionCall {
     name: String,
     arguments: String,
 }
 
 #[derive(Debug, Serialize)]
-struct MoonshotTool {
+struct ZhipuTool {
     #[serde(rename = "type")]
     tool_type: String,
-    function: MoonshotFunction,
+    function: ZhipuFunction,
 }
 
 #[derive(Debug, Serialize)]
-struct MoonshotFunction {
+struct ZhipuFunction {
     name: String,
     description: String,
     parameters: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotResponse {
-    choices: Vec<MoonshotChoice>,
+struct ZhipuResponse {
+    choices: Vec<ZhipuChoice>,
     model: Option<String>,
-    usage: Option<MoonshotUsage>,
+    usage: Option<ZhipuUsage>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotUsage {
+struct ZhipuErrorResponse {
+    error: ZhipuError,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZhipuError {
+    code: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ZhipuUsage {
     prompt_tokens: u64,
     completion_tokens: u64,
     total_tokens: u64,
 }
 
-impl From<MoonshotUsage> for UsageStats {
-    fn from(usage: MoonshotUsage) -> Self {
+impl From<ZhipuUsage> for UsageStats {
+    fn from(usage: ZhipuUsage) -> Self {
         UsageStats {
             input_tokens: usage.prompt_tokens,
             output_tokens: usage.completion_tokens,
@@ -137,46 +148,46 @@ impl From<MoonshotUsage> for UsageStats {
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotChoice {
-    message: MoonshotMessage,
+struct ZhipuChoice {
+    message: ZhipuMessage,
     finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotStreamResponse {
-    choices: Vec<MoonshotStreamChoice>,
+struct ZhipuStreamResponse {
+    choices: Vec<ZhipuStreamChoice>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotStreamChoice {
-    delta: MoonshotDelta,
+struct ZhipuStreamChoice {
+    delta: ZhipuDelta,
     finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotDelta {
+struct ZhipuDelta {
     content: Option<String>,
-    tool_calls: Option<Vec<MoonshotStreamToolCall>>,
+    tool_calls: Option<Vec<ZhipuStreamToolCall>>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotStreamToolCall {
+struct ZhipuStreamToolCall {
     index: usize,
     id: Option<String>,
-    function: Option<MoonshotStreamFunction>,
+    function: Option<ZhipuStreamFunction>,
 }
 
 #[derive(Debug, Deserialize)]
-struct MoonshotStreamFunction {
+struct ZhipuStreamFunction {
     name: Option<String>,
     arguments: Option<String>,
 }
 
-fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<MoonshotMessage> {
+fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<ZhipuMessage> {
     let mut result = Vec::new();
 
     if let Some(sys) = system {
-        result.push(MoonshotMessage {
+        result.push(ZhipuMessage {
             role: "system".to_string(),
             content: Some(sys.to_string()),
             tool_calls: None,
@@ -187,7 +198,7 @@ fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<Moons
     for msg in messages {
         match &msg.content {
             MessageContent::Text(text) => {
-                result.push(MoonshotMessage {
+                result.push(ZhipuMessage {
                     role: match msg.role {
                         ChatRole::User => "user",
                         ChatRole::Assistant => "assistant",
@@ -208,10 +219,10 @@ fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<Moons
                             text_content.push_str(text);
                         }
                         ContentBlock::ToolUse { id, name, input } => {
-                            tool_calls.push(MoonshotToolCall {
+                            tool_calls.push(ZhipuToolCall {
                                 id: id.clone(),
                                 call_type: "function".to_string(),
-                                function: MoonshotFunctionCall {
+                                function: ZhipuFunctionCall {
                                     name: name.clone(),
                                     arguments: serde_json::to_string(input).unwrap_or_default(),
                                 },
@@ -224,7 +235,7 @@ fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<Moons
                 }
 
                 if !text_content.is_empty() || !tool_calls.is_empty() {
-                    result.push(MoonshotMessage {
+                    result.push(ZhipuMessage {
                         role: match msg.role {
                             ChatRole::User => "user",
                             ChatRole::Assistant => "assistant",
@@ -236,7 +247,7 @@ fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<Moons
                 }
 
                 for (tool_id, content) in tool_results {
-                    result.push(MoonshotMessage {
+                    result.push(ZhipuMessage {
                         role: "tool".to_string(),
                         content: Some(content),
                         tool_calls: None,
@@ -250,10 +261,10 @@ fn convert_messages(messages: &[ChatMessage], system: Option<&str>) -> Vec<Moons
     result
 }
 
-fn convert_tools(tools: &[ToolDefinition]) -> Vec<MoonshotTool> {
-    tools.iter().map(|t| MoonshotTool {
+fn convert_tools(tools: &[ToolDefinition]) -> Vec<ZhipuTool> {
+    tools.iter().map(|t| ZhipuTool {
         tool_type: "function".to_string(),
-        function: MoonshotFunction {
+        function: ZhipuFunction {
             name: t.name.clone(),
             description: t.description.clone(),
             parameters: t.input_schema.clone(),
@@ -262,9 +273,9 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<MoonshotTool> {
 }
 
 #[async_trait]
-impl Provider for MoonshotProvider {
+impl Provider for ZhipuProvider {
     fn name(&self) -> &str {
-        "moonshot"
+        "z"
     }
 
     fn model(&self) -> &str {
@@ -293,10 +304,10 @@ impl Provider for MoonshotProvider {
         tools: Option<&[ToolDefinition]>,
         max_tokens: u32,
     ) -> Result<ChatResponse> {
-        let request = MoonshotRequest {
+        let request = ZhipuRequest {
             model: self.model.clone(),
             messages: convert_messages(&messages, system),
-            max_tokens,
+            max_tokens: Some(max_tokens),
             tools: tools.map(convert_tools),
             stream: None,
             temperature: Some(0.7),
@@ -310,21 +321,25 @@ impl Provider for MoonshotProvider {
             .json(&request)
             .send()
             .await
-            .context("Failed to send request to Moonshot")?;
+            .context("Failed to send request to Zhipu")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Moonshot API error {}: {}", status, body);
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            anyhow::bail!("Z API error {}: {}", status, body);
         }
 
-        let response: MoonshotResponse = response
-            .json()
-            .await
-            .context("Failed to parse Moonshot response")?;
+        // Check for error response in body (some APIs return 200 with error JSON)
+        if let Ok(error_resp) = serde_json::from_str::<ZhipuErrorResponse>(&body) {
+            anyhow::bail!("Z API error {}: {}", error_resp.error.code, error_resp.error.message);
+        }
+
+        let response: ZhipuResponse = serde_json::from_str(&body)
+            .context("Failed to parse Z response")?;
 
         let choice = response.choices.into_iter().next()
-            .ok_or_else(|| anyhow::anyhow!("No response from Moonshot"))?;
+            .ok_or_else(|| anyhow::anyhow!("No response from Zhipu"))?;
 
         let mut blocks = Vec::new();
 
@@ -374,10 +389,10 @@ impl Provider for MoonshotProvider {
         tools: Option<&[ToolDefinition]>,
         max_tokens: u32,
     ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>> {
-        let request = MoonshotRequest {
+        let request = ZhipuRequest {
             model: self.model.clone(),
             messages: convert_messages(&messages, system),
-            max_tokens,
+            max_tokens: Some(max_tokens),
             tools: tools.map(convert_tools),
             stream: Some(true),
             temperature: Some(0.7),
@@ -391,18 +406,33 @@ impl Provider for MoonshotProvider {
             .json(&request)
             .send()
             .await
-            .context("Failed to send request to Moonshot")?;
+            .context("Failed to send request to Zhipu")?;
 
-        if !response.status().is_success() {
-            let status = response.status();
+        // For streaming, we need to check if the first chunk is an error
+        let status = response.status();
+        if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Moonshot API error {}: {}", status, body);
+            anyhow::bail!("Z API error {}: {}", status, body);
         }
 
-        let stream = response.bytes_stream();
+        // Read first chunk to check for error response
+        let mut stream = response.bytes_stream();
+        let mut initial_buffer = String::new();
+
+        // Peek at the response to detect errors
+        if let Some(Ok(chunk)) = stream.next().await {
+            initial_buffer = String::from_utf8_lossy(&chunk).to_string();
+
+            // Check if this looks like an error response
+            if initial_buffer.starts_with("{\"error\"") {
+                if let Ok(error_resp) = serde_json::from_str::<ZhipuErrorResponse>(&initial_buffer) {
+                    anyhow::bail!("Z API error {}: {}", error_resp.error.code, error_resp.error.message);
+                }
+            }
+        }
 
         let event_stream = futures_util::stream::unfold(
-            (stream, String::new(), Vec::<(String, String, String)>::new()),
+            (stream, initial_buffer, Vec::<(String, String, String)>::new()),
             |(mut stream, mut buffer, mut tool_calls)| async move {
                 loop {
                     while let Some(pos) = buffer.find("\n\n") {
@@ -421,7 +451,7 @@ impl Provider for MoonshotProvider {
                                     ));
                                 }
 
-                                if let Ok(resp) = serde_json::from_str::<MoonshotStreamResponse>(data) {
+                                if let Ok(resp) = serde_json::from_str::<ZhipuStreamResponse>(data) {
                                     if let Some(choice) = resp.choices.first() {
                                         if let Some(content) = &choice.delta.content {
                                             if !content.is_empty() {
@@ -474,6 +504,52 @@ impl Provider for MoonshotProvider {
                                             ));
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    // Also try parsing newline-delimited JSON (some APIs use this)
+                    while let Some(pos) = buffer.find('\n') {
+                        let line = buffer[..pos].to_string();
+                        buffer = buffer[pos + 1..].to_string();
+
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        // Handle data: prefix if present
+                        let json_str = line.strip_prefix("data: ").unwrap_or(&line);
+
+                        if json_str == "[DONE]" {
+                            return Some((
+                                StreamEvent::MessageComplete {
+                                    usage: None,
+                                    stop_reason: None,
+                                },
+                                (stream, buffer, tool_calls),
+                            ));
+                        }
+
+                        if let Ok(resp) = serde_json::from_str::<ZhipuStreamResponse>(json_str) {
+                            if let Some(choice) = resp.choices.first() {
+                                if let Some(content) = &choice.delta.content {
+                                    if !content.is_empty() {
+                                        return Some((
+                                            StreamEvent::TextDelta(content.clone()),
+                                            (stream, buffer, tool_calls),
+                                        ));
+                                    }
+                                }
+
+                                if choice.finish_reason.is_some() {
+                                    return Some((
+                                        StreamEvent::MessageComplete {
+                                            usage: None,
+                                            stop_reason: choice.finish_reason.clone(),
+                                        },
+                                        (stream, buffer, tool_calls),
+                                    ));
                                 }
                             }
                         }
