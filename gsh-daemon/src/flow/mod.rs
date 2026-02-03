@@ -3,8 +3,9 @@
 //! This module provides data structures and parsing for flow definitions,
 //! which describe how multiple agents coordinate to accomplish complex tasks.
 
-mod engine;
-mod parser;
+pub mod engine;
+pub mod parser;
+pub mod roles;
 
 
 use serde::{Deserialize, Serialize};
@@ -50,19 +51,33 @@ pub struct AgentNode {
     pub description: String,
 
     /// The agent type/role (e.g., "planner", "coder", "reviewer")
+    /// Can be a built-in role or reference a role file in ~/.config/gsh/roles/
     #[serde(default = "default_agent_type")]
     pub agent_type: String,
 
-    /// Custom system prompt for this agent (optional, uses default if not set)
+    /// Role template to use (alternative to agent_type, loads from roles directory)
+    /// If both role and agent_type are specified, role takes precedence
+    #[serde(default)]
+    pub role: Option<String>,
+
+    /// Custom system prompt for this agent (optional, overrides role prompt)
     pub system_prompt: Option<String>,
 
-    /// Tools this agent is allowed to use (empty = all allowed)
+    /// Tools this agent is allowed to use (empty = all allowed, merged with role)
     #[serde(default)]
     pub allowed_tools: Vec<String>,
 
-    /// Tools this agent is NOT allowed to use
+    /// Tools this agent is NOT allowed to use (merged with role)
     #[serde(default)]
     pub denied_tools: Vec<String>,
+
+    /// Provider override for this node
+    #[serde(default)]
+    pub provider: Option<String>,
+
+    /// Model override for this node
+    #[serde(default)]
+    pub model: Option<String>,
 
     /// Where to go after this node completes
     pub next: NextNode,

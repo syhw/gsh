@@ -213,7 +213,16 @@ async fn process_message(
             Ok(Some(DaemonMessage::Ack))
         }
 
-        ShellMessage::Prompt { query, cwd, session_id, stream, provider: provider_override, model: model_override, flow: _flow_name } => {
+        ShellMessage::Prompt { query, cwd, session_id, stream, provider: provider_override, model: model_override, flow: flow_name } => {
+            // Check if this is a flow execution
+            if let Some(flow_name) = flow_name {
+                return run_flow(
+                    &flow_name, &query, &cwd, stream, session_id,
+                    provider_override, model_override,
+                    state, writer
+                ).await;
+            }
+
             // Get shell context
             let context = {
                 let ctx = state.context.read().await;
@@ -502,4 +511,215 @@ async fn check_status(config: &config::Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Load and execute a flow
+async fn run_flow(
+    flow_name: &str,
+    input: &str,
+    cwd: &str,
+    stream: bool,
+    session_id: Option<String>,
+    _provider_override: Option<String>,
+    _model_override: Option<String>,
+    state: &Arc<DaemonState>,
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Result<Option<DaemonMessage>> {
+    use flow::engine::{FlowEngine, FlowEvent};
+    use std::path::Path;
+
+    // Find flow file
+    let flow_path = find_flow_file(flow_name)?;
+
+    // Parse flow
+    let flow = flow::parser::parse_flow_file(&flow_path)
+        .map_err(|e| anyhow::anyhow!("Failed to parse flow '{}': {}", flow_name, e))?;
+
+    // Validate flow
+    flow.validate()
+        .map_err(|e| anyhow::anyhow!("Invalid flow '{}': {}", flow_name, e))?;
+
+    info!("Running flow: {} ({} nodes)", flow.name, flow.nodes.len());
+
+    // Create flow engine
+    let engine = FlowEngine::new(state.config.clone());
+
+    // Create event channel
+    let (event_tx, mut event_rx) = mpsc::channel::<FlowEvent>(100);
+
+    // Spawn flow execution
+    let flow_clone = flow.clone();
+    let input_clone = input.to_string();
+    let cwd_clone = cwd.to_string();
+
+    let flow_handle = tokio::spawn(async move {
+        engine.run(&flow_clone, &input_clone, &cwd_clone, event_tx).await
+    });
+
+    // Stream events to client
+    let mut final_output = String::new();
+    let mut had_error = false;
+
+    while let Some(event) = event_rx.recv().await {
+        let msg = match event {
+            FlowEvent::FlowStarted { flow_name, entry_node } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: format!("[Flow '{}' started, entry: {}]\n", flow_name, entry_node),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::NodeStarted { node_id, node_name, tmux_session, .. } => {
+                if stream {
+                    let session_info = tmux_session
+                        .map(|s| format!(" (tmux: {})", s))
+                        .unwrap_or_default();
+                    Some(DaemonMessage::TextChunk {
+                        text: format!("[Node '{}' ({}) started{}]\n", node_id, node_name, session_info),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::NodeText { text, .. } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk { text, done: false })
+                } else {
+                    final_output.push_str(&text);
+                    None
+                }
+            }
+            FlowEvent::NodeToolUse { node_id, tool, input } => {
+                Some(DaemonMessage::ToolUse {
+                    tool: format!("{}:{}", node_id, tool),
+                    input,
+                })
+            }
+            FlowEvent::NodeToolResult { node_id, tool, output, success } => {
+                Some(DaemonMessage::ToolResult {
+                    tool: format!("{}:{}", node_id, tool),
+                    output,
+                    success,
+                })
+            }
+            FlowEvent::NodeCompleted { node_id, output, next_node } => {
+                final_output = output.clone();
+                if stream {
+                    let next_info = next_node
+                        .map(|n| format!(" -> {}", n))
+                        .unwrap_or_else(|| " (end)".to_string());
+                    Some(DaemonMessage::TextChunk {
+                        text: format!("\n[Node '{}' completed{}]\n", node_id, next_info),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::ParallelStarted { node_ids } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: format!("[Parallel execution: {}]\n", node_ids.join(", ")),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::ParallelCompleted { join_node, .. } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: format!("[Parallel complete, joining at: {}]\n", join_node),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::FlowCompleted { final_output: output } => {
+                final_output = output;
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: "\n[Flow completed]\n".to_string(),
+                        done: true,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::FlowError { node_id, error } => {
+                had_error = true;
+                let node_info = node_id
+                    .map(|n| format!(" in node '{}'", n))
+                    .unwrap_or_default();
+                Some(DaemonMessage::Error {
+                    message: format!("Flow error{}: {}", node_info, error),
+                    code: None,
+                })
+            }
+        };
+
+        if let Some(msg) = msg {
+            let response_str = serde_json::to_string(&msg)? + "\n";
+            writer.write_all(response_str.as_bytes()).await?;
+        }
+    }
+
+    // Wait for flow to complete
+    let _ = flow_handle.await?;
+
+    // Send final response if not streaming and no error
+    if !stream && !had_error {
+        let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        return Ok(Some(DaemonMessage::Response {
+            text: final_output,
+            session_id,
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Find a flow file by name
+/// Searches in:
+/// 1. .gsh/flows/{name}.toml (project-local)
+/// 2. ~/.config/gsh/flows/{name}.toml (user config)
+fn find_flow_file(name: &str) -> Result<std::path::PathBuf> {
+    // Add .toml extension if not present
+    let filename = if name.ends_with(".toml") {
+        name.to_string()
+    } else {
+        format!("{}.toml", name)
+    };
+
+    // Check project-local first
+    let local_path = std::path::Path::new(".gsh/flows").join(&filename);
+    if local_path.exists() {
+        return Ok(local_path);
+    }
+
+    // Check user config
+    if let Some(home) = dirs::home_dir() {
+        let user_path = home.join(".config/gsh/flows").join(&filename);
+        if user_path.exists() {
+            return Ok(user_path);
+        }
+    }
+
+    // Check XDG config
+    if let Some(config_dir) = dirs::config_dir() {
+        let config_path = config_dir.join("gsh/flows").join(&filename);
+        if config_path.exists() {
+            return Ok(config_path);
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "Flow '{}' not found. Looked in:\n  - .gsh/flows/{}\n  - ~/.config/gsh/flows/{}",
+        name, filename, filename
+    ))
 }

@@ -99,11 +99,17 @@ struct NodeToml {
     description: String,
     #[serde(default = "default_agent_type")]
     agent_type: String,
+    #[serde(default)]
+    role: Option<String>,
     system_prompt: Option<String>,
     #[serde(default)]
     allowed_tools: Vec<String>,
     #[serde(default)]
     denied_tools: Vec<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     #[serde(default = "default_max_iterations")]
     max_iterations: usize,
     #[serde(default)]
@@ -175,9 +181,12 @@ fn convert_flow(flow_toml: FlowToml) -> Result<Flow, FlowParseError> {
                 name: node_toml.name,
                 description: node_toml.description,
                 agent_type: node_toml.agent_type,
+                role: node_toml.role,
                 system_prompt: node_toml.system_prompt,
                 allowed_tools: node_toml.allowed_tools,
                 denied_tools: node_toml.denied_tools,
+                provider: node_toml.provider,
+                model: node_toml.model,
                 next,
                 max_iterations: node_toml.max_iterations,
                 timeout_secs: node_toml.timeout_secs,

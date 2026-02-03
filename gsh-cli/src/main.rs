@@ -51,6 +51,27 @@ enum Commands {
     },
     /// List running subagents
     Agents,
+    /// Attach to a subagent's tmux session
+    Attach {
+        /// Agent ID or session name
+        agent: String,
+    },
+    /// View logs from a subagent session
+    Logs {
+        /// Agent ID or session name
+        agent: String,
+        /// Include full scrollback history
+        #[arg(long, short = 'a')]
+        all: bool,
+        /// Follow output (like tail -f)
+        #[arg(long, short = 'f')]
+        follow: bool,
+    },
+    /// Kill a subagent
+    Kill {
+        /// Agent ID or session name
+        agent: String,
+    },
     /// Check daemon status
     Status,
     /// Stop the daemon
@@ -143,6 +164,15 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Agents) => {
             run_agents().await
+        }
+        Some(Commands::Attach { agent }) => {
+            run_attach(&agent)
+        }
+        Some(Commands::Logs { agent, all, follow }) => {
+            run_logs(&agent, all, follow).await
+        }
+        Some(Commands::Kill { agent }) => {
+            run_kill(&agent).await
         }
         Some(Commands::Status) => {
             run_status().await
@@ -494,5 +524,158 @@ async fn run_stop() -> Result<()> {
     reader.read_line(&mut line).await?;
 
     println!("Daemon stopped");
+    Ok(())
+}
+
+/// Resolve agent identifier to session name
+/// Accepts: agent ID (e.g., "1", "0001") or full session name
+fn resolve_agent_session(agent: &str) -> String {
+    // If it looks like a number, format as session name
+    if let Ok(id) = agent.parse::<u64>() {
+        format!("gsh-agent-{:04}", id)
+    } else if agent.starts_with("gsh-") {
+        // Already a full session name
+        agent.to_string()
+    } else {
+        // Assume it's a partial name, add prefix
+        format!("gsh-{}", agent)
+    }
+}
+
+fn run_attach(agent: &str) -> Result<()> {
+    use std::process::Command;
+
+    let session = resolve_agent_session(agent);
+
+    // Check if session exists
+    let exists = Command::new("tmux")
+        .args(["has-session", "-t", &session])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !exists {
+        anyhow::bail!("Session '{}' not found. Run 'gsh agents' to list available sessions.", session);
+    }
+
+    // Check if we're inside tmux
+    let inside_tmux = std::env::var("TMUX").is_ok();
+
+    if inside_tmux {
+        // Switch client
+        let status = Command::new("tmux")
+            .args(["switch-client", "-t", &session])
+            .status()
+            .context("Failed to switch tmux client")?;
+
+        if !status.success() {
+            anyhow::bail!("Failed to switch to session '{}'", session);
+        }
+    } else {
+        // Attach to session - this replaces the current process
+        let err = exec::Command::new("tmux")
+            .args(&["attach-session", "-t", &session])
+            .exec();
+
+        // exec() only returns if there was an error
+        anyhow::bail!("Failed to attach to session '{}': {}", session, err);
+    }
+
+    Ok(())
+}
+
+async fn run_logs(agent: &str, include_history: bool, follow: bool) -> Result<()> {
+    use std::process::Command;
+    use tokio::time::{sleep, Duration};
+
+    let session = resolve_agent_session(agent);
+
+    // Check if session exists
+    let exists = Command::new("tmux")
+        .args(["has-session", "-t", &session])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if !exists {
+        anyhow::bail!("Session '{}' not found. Run 'gsh agents' to list available sessions.", session);
+    }
+
+    if follow {
+        // Follow mode - continuously capture and print new output
+        println!("Following output from '{}' (Ctrl+C to stop)...\n", session);
+
+        let mut last_line_count = 0;
+
+        loop {
+            let mut cmd = Command::new("tmux");
+            cmd.args(["capture-pane", "-t", &session, "-p"]);
+
+            if include_history {
+                cmd.args(["-S", "-"]);
+            }
+
+            let output = cmd.output().context("Failed to capture pane")?;
+
+            if output.status.success() {
+                let content = String::from_utf8_lossy(&output.stdout);
+                let lines: Vec<&str> = content.lines().collect();
+                let current_count = lines.len();
+
+                // Print only new lines
+                if current_count > last_line_count {
+                    for line in &lines[last_line_count..] {
+                        println!("{}", line);
+                    }
+                    last_line_count = current_count;
+                }
+            }
+
+            sleep(Duration::from_millis(500)).await;
+        }
+    } else {
+        // One-shot capture
+        let mut cmd = Command::new("tmux");
+        cmd.args(["capture-pane", "-t", &session, "-p"]);
+
+        if include_history {
+            cmd.args(["-S", "-"]);
+        }
+
+        let output = cmd.output().context("Failed to capture pane")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to capture logs from '{}': {}", session, stderr);
+        }
+
+        let content = String::from_utf8_lossy(&output.stdout);
+        print!("{}", content);
+    }
+
+    Ok(())
+}
+
+async fn run_kill(agent: &str) -> Result<()> {
+    use std::process::Command;
+
+    let session = resolve_agent_session(agent);
+
+    let output = Command::new("tmux")
+        .args(["kill-session", "-t", &session])
+        .output()
+        .context("Failed to kill session")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("can't find session") {
+            println!("Session '{}' not found", session);
+        } else {
+            anyhow::bail!("Failed to kill session '{}': {}", session, stderr);
+        }
+    } else {
+        println!("Killed session '{}'", session);
+    }
+
     Ok(())
 }

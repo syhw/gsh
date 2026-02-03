@@ -160,6 +160,44 @@ impl FlowEngine {
         self.model_overrides.insert(node_id.to_string(), model.to_string());
     }
 
+    /// Resolve role for a node
+    /// Checks in order: node.role, node.agent_type as role, built-in roles
+    fn resolve_role(&self, node: &super::AgentNode) -> Result<Option<super::roles::Role>> {
+        use super::roles::{Role, RoleRegistry};
+
+        // First check explicit role reference
+        if let Some(ref role_name) = node.role {
+            // Try built-in role first
+            if let Some(builtin) = Role::builtin(role_name) {
+                return Ok(Some(builtin));
+            }
+
+            // Try loading from file
+            let mut registry = RoleRegistry::new();
+            match registry.get(role_name) {
+                Ok(role) => return Ok(Some(role.clone())),
+                Err(e) => {
+                    warn!("Failed to load role '{}': {}", role_name, e);
+                    // Fall through to agent_type check
+                }
+            }
+        }
+
+        // Check if agent_type matches a built-in role
+        if let Some(builtin) = Role::builtin(&node.agent_type) {
+            return Ok(Some(builtin));
+        }
+
+        // Try loading agent_type as a role file
+        let mut registry = RoleRegistry::new();
+        if let Ok(role) = registry.get(&node.agent_type) {
+            return Ok(Some(role.clone()));
+        }
+
+        // No role found, that's okay - use node settings directly
+        Ok(None)
+    }
+
     /// Execute a flow
     pub async fn run(
         &self,
@@ -209,10 +247,15 @@ impl FlowEngine {
         ctx: Arc<RwLock<FlowContext>>,
         event_tx: &mpsc::Sender<FlowEvent>,
     ) -> Result<String> {
+        use super::roles::Role;
+
         let node = flow.get_node(node_id)
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", node_id))?;
 
         info!("Executing node: {} ({})", node_id, node.name);
+
+        // Resolve role for this node
+        let role = self.resolve_role(node)?;
 
         // Spawn tmux session for this agent (if tmux is available)
         let tmux_session = if TmuxManager::is_available() {
@@ -234,23 +277,43 @@ impl FlowEngine {
             None
         };
 
+        let role_name = role.as_ref().map(|r| r.name.clone()).unwrap_or_else(|| node.agent_type.clone());
+
         let _ = event_tx.send(FlowEvent::NodeStarted {
             node_id: node_id.to_string(),
             node_name: node.name.clone(),
-            agent_type: node.agent_type.clone(),
+            agent_type: role_name,
             tmux_session: tmux_session.clone(),
         }).await;
 
-        // Build the prompt with context
-        let prompt = ctx.read().await.build_prompt(node_id);
+        // Build the prompt with context and role system prompt
+        let base_prompt = ctx.read().await.build_prompt(node_id);
+        let prompt = if let Some(ref role) = role {
+            if let Some(ref system) = role.system_prompt {
+                format!("{}\n\n---\n\n{}", system, base_prompt)
+            } else {
+                base_prompt
+            }
+        } else {
+            base_prompt
+        };
 
-        // Get provider for this node
-        let provider_name = self.provider_overrides
-            .get(node_id)
-            .cloned()
+        // Determine provider: node override > role > engine override > config default
+        let provider_name = node.provider.clone()
+            .or_else(|| role.as_ref().and_then(|r| r.provider.clone()))
+            .or_else(|| self.provider_overrides.get(node_id).cloned())
             .unwrap_or_else(|| self.config.llm.default_provider.clone());
 
-        let provider = provider::create_provider(&provider_name, &self.config)?;
+        // Determine model: node override > role > engine override
+        let model_override = node.model.clone()
+            .or_else(|| role.as_ref().and_then(|r| r.model.clone()))
+            .or_else(|| self.model_overrides.get(node_id).cloned());
+
+        let provider = if let Some(model) = model_override {
+            provider::create_provider_with_model(&provider_name, &model, &self.config)?
+        } else {
+            provider::create_provider(&provider_name, &self.config)?
+        };
 
         // Create agent with node-specific configuration
         let agent = Agent::new(
