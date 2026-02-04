@@ -1,4 +1,4 @@
-use gsh_daemon::{agent, config, flow, protocol, provider, session, state, tmux};
+use gsh_daemon::{agent, config, flow, observability, protocol, provider, session, state, tmux};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -42,6 +42,12 @@ enum Commands {
     Stop,
     /// Check daemon status
     Status,
+    /// Open the observability dashboard
+    Dashboard {
+        /// Custom log directory
+        #[arg(short, long)]
+        log_dir: Option<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -85,6 +91,13 @@ async fn main() -> Result<()> {
         }
         Commands::Status => {
             check_status(&config).await
+        }
+        Commands::Dashboard { log_dir } => {
+            if let Some(dir) = log_dir {
+                observability::run_dashboard_with_dir(dir)
+            } else {
+                observability::run_dashboard()
+            }
         }
     }
 }

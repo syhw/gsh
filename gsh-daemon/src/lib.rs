@@ -7,6 +7,7 @@ pub mod agent;
 pub mod config;
 pub mod context;
 pub mod flow;
+pub mod observability;
 pub mod protocol;
 pub mod provider;
 pub mod session;

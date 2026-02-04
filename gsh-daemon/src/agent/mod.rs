@@ -1,11 +1,15 @@
 pub mod tools;
 
 use crate::config::Config;
+use crate::observability::{EventKind, Observer};
 use crate::provider::{
     ChatMessage, ChatRole, ContentBlock, MessageContent, Provider, StreamEvent, ToolDefinition,
+    UsageStats,
 };
 use anyhow::Result;
 use futures_util::StreamExt;
+use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::mpsc;
 use tools::ToolExecutor;
 
@@ -31,6 +35,12 @@ pub struct Agent {
     system_prompt: String,
     max_tokens: u32,
     max_iterations: usize,
+    /// Optional observer for logging and metrics
+    observer: Option<Arc<Observer>>,
+    /// Session ID for observability
+    session_id: String,
+    /// Agent ID within the session
+    agent_id: String,
 }
 
 impl Agent {
@@ -63,6 +73,46 @@ Guidelines:
             system_prompt,
             max_tokens: config.llm.max_tokens,
             max_iterations: 10,
+            observer: None,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            agent_id: "root".to_string(),
+        }
+    }
+
+    /// Set the observer for logging and metrics
+    pub fn with_observer(mut self, observer: Arc<Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Set the session ID
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+
+    /// Set the agent ID
+    pub fn with_agent_id(mut self, agent_id: impl Into<String>) -> Self {
+        self.agent_id = agent_id.into();
+        self
+    }
+
+    /// Log an event if observer is present
+    fn log_event(&self, event: EventKind) {
+        if let Some(ref observer) = self.observer {
+            observer.log_event(&self.session_id, &self.agent_id, event);
+        }
+    }
+
+    /// Record usage if observer is present
+    fn record_usage(&self, usage: &UsageStats) {
+        if let Some(ref observer) = self.observer {
+            observer.record_usage(
+                &self.session_id,
+                self.provider.name(),
+                self.provider.model(),
+                usage,
+            );
         }
     }
 
@@ -78,6 +128,9 @@ Guidelines:
         context: Option<&str>,
         event_tx: mpsc::Sender<AgentEvent>,
     ) -> Result<String> {
+        // Log the prompt
+        self.log_event(EventKind::prompt(query));
+
         let mut messages = Vec::new();
 
         // Build the user message with context
@@ -112,7 +165,15 @@ Guidelines:
         let tools = self.tool_definitions();
         let mut final_text = String::new();
 
-        for _ in 0..self.max_iterations {
+        // Log start event
+        self.log_event(EventKind::Start { flow: None });
+
+        for iteration in 0..self.max_iterations {
+            // Log iteration
+            self.log_event(EventKind::Iteration {
+                iteration,
+                max_iterations: self.max_iterations,
+            });
             // Call the LLM with streaming
             let stream_result = self
                 .provider
@@ -128,6 +189,7 @@ Guidelines:
                 Ok(s) => s,
                 Err(e) => {
                     let error_msg = e.to_string();
+                    self.log_event(EventKind::error(&error_msg, Some(false)));
                     let _ = event_tx.send(AgentEvent::Error(error_msg.clone())).await;
                     anyhow::bail!("{}", error_msg);
                 }
@@ -156,15 +218,20 @@ Guidelines:
                     StreamEvent::ToolUseInputDelta(json) => {
                         current_tool_input.push_str(&json);
                     }
-                    StreamEvent::MessageComplete { usage: _, stop_reason: _ } => {
+                    StreamEvent::MessageComplete { usage, stop_reason: _ } => {
                         // Save last tool's input
                         if let Some(idx) = current_tool_idx {
                             tool_uses[idx].2 = std::mem::take(&mut current_tool_input);
+                        }
+                        // Record usage if available
+                        if let Some(ref usage_stats) = usage {
+                            self.record_usage(usage_stats);
                         }
                         break;
                     }
                     StreamEvent::Error(e) => {
                         let error_msg = e.to_string();
+                        self.log_event(EventKind::error(&error_msg, Some(false)));
                         let _ = event_tx.send(AgentEvent::Error(error_msg.clone())).await;
                         anyhow::bail!("Stream error: {}", error_msg);
                     }
@@ -174,6 +241,8 @@ Guidelines:
             // If no tool uses, we're done
             if tool_uses.is_empty() {
                 final_text = response_text;
+                // Log completion
+                self.log_event(EventKind::complete(None, Some(final_text.clone())));
                 let _ = event_tx.send(AgentEvent::Done { final_text: final_text.clone() }).await;
                 break;
             }
@@ -206,16 +275,25 @@ Guidelines:
                 let input: serde_json::Value = serde_json::from_str(&input_json)
                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
+                // Log tool call
+                self.log_event(EventKind::tool_call(&name, input.clone()));
+
                 let _ = event_tx.send(AgentEvent::ToolStart {
                     name: name.clone(),
                     input: input.clone(),
                 }).await;
 
+                let start_time = Instant::now();
                 let result = self.tool_executor.execute(&name, &input).await;
+                let duration_ms = start_time.elapsed().as_millis() as u64;
+
                 let (output, success) = match result {
                     Ok(output) => (output, true),
                     Err(e) => (format!("Error: {}", e), false),
                 };
+
+                // Log tool result
+                self.log_event(EventKind::tool_result(&name, &output, success, Some(duration_ms)));
 
                 let _ = event_tx.send(AgentEvent::ToolResult {
                     name: name.clone(),
