@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod moonshot;
 pub mod ollama;
 pub mod openai;
+pub mod together;
 pub mod zhipu;
 
 use anyhow::Result;
@@ -493,6 +494,16 @@ pub fn create_provider(
                 config.llm.zhipu.base_url.clone(),
             )))
         }
+        "together" => {
+            let api_key = config
+                .together_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Together API key not configured (set TOGETHER_API_KEY)"))?;
+            Ok(Box::new(together::TogetherProvider::new(
+                api_key,
+                config.llm.together.model.clone(),
+                config.llm.together.base_url.clone(),
+            )))
+        }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),
     }
 }
@@ -547,6 +558,16 @@ pub fn create_provider_with_model(
                 api_key,
                 model.to_string(),
                 config.llm.zhipu.base_url.clone(),
+            )))
+        }
+        "together" => {
+            let api_key = config
+                .together_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Together API key not configured (set TOGETHER_API_KEY)"))?;
+            Ok(Box::new(together::TogetherProvider::new(
+                api_key,
+                model.to_string(),
+                config.llm.together.base_url.clone(),
             )))
         }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),

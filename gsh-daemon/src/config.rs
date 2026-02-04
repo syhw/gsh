@@ -27,7 +27,7 @@ pub struct DaemonConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// Default provider (anthropic, openai, moonshot, ollama, zhipu)
+    /// Default provider (anthropic, openai, moonshot, ollama, zhipu, together)
     #[serde(default = "default_provider")]
     pub default_provider: String,
     #[serde(default)]
@@ -40,6 +40,8 @@ pub struct LlmConfig {
     pub ollama: OllamaConfig,
     #[serde(default)]
     pub zhipu: ZhipuConfig,
+    #[serde(default)]
+    pub together: TogetherConfig,
     /// Maximum tokens in response
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -112,6 +114,27 @@ impl Default for ZhipuConfig {
         Self {
             api_key: None,
             model: default_zhipu_model(),
+            base_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TogetherConfig {
+    /// API key (can also use TOGETHER_API_KEY env var)
+    pub api_key: Option<String>,
+    /// Model to use (e.g., moonshotai/Kimi-K2.5, Qwen/Qwen3-Coder-Next-FP8)
+    #[serde(default = "default_together_model")]
+    pub model: String,
+    /// Base URL
+    pub base_url: Option<String>,
+}
+
+impl Default for TogetherConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            model: default_together_model(),
             base_url: None,
         }
     }
@@ -191,6 +214,10 @@ fn default_zhipu_model() -> String {
     "GLM-4.7".to_string()
 }
 
+fn default_together_model() -> String {
+    "moonshotai/Kimi-K2.5".to_string()
+}
+
 fn default_max_events() -> usize {
     100
 }
@@ -237,6 +264,7 @@ impl Default for LlmConfig {
             moonshot: MoonshotConfig::default(),
             ollama: OllamaConfig::default(),
             zhipu: ZhipuConfig::default(),
+            together: TogetherConfig::default(),
             max_tokens: default_max_tokens(),
             system_prompt: None,
         }
@@ -349,5 +377,14 @@ impl Config {
             .api_key
             .clone()
             .or_else(|| std::env::var("ZAI_API_KEY").ok())
+    }
+
+    /// Get API key for Together.AI (config or env var)
+    pub fn together_api_key(&self) -> Option<String> {
+        self.llm
+            .together
+            .api_key
+            .clone()
+            .or_else(|| std::env::var("TOGETHER_API_KEY").ok())
     }
 }
