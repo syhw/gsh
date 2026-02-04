@@ -16,10 +16,12 @@ use std::process::Command;
 /// This is maintained for backward compatibility. For new code,
 /// prefer using `manager::TmuxManager` which provides more comprehensive
 /// subagent lifecycle management.
+#[allow(dead_code)]
 pub struct BasicTmuxManager {
     session_prefix: String,
 }
 
+#[allow(dead_code)]
 impl BasicTmuxManager {
     pub fn new() -> Self {
         Self {

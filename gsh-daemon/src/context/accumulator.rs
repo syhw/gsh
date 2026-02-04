@@ -21,6 +21,7 @@ pub enum ShellEvent {
     },
 }
 
+#[allow(dead_code)]
 impl ShellEvent {
     pub fn timestamp(&self) -> &DateTime<Utc> {
         match self {
@@ -113,6 +114,7 @@ impl ContextAccumulator {
     }
 
     /// Get recent events (most recent first)
+    #[allow(dead_code)]
     pub fn recent_events(&self, count: usize) -> Vec<&ShellEvent> {
         self.events.iter().rev().take(count).collect()
     }
@@ -180,17 +182,20 @@ impl ContextAccumulator {
     }
 
     /// Clear all events
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.events.clear();
         self.pending_command = None;
     }
 
     /// Number of recorded events
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.events.len()
     }
 
     /// Check if empty
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.events.is_empty()
     }

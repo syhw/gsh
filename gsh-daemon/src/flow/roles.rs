@@ -167,6 +167,7 @@ impl RoleRegistry {
     }
 
     /// Add a custom search path
+    #[allow(dead_code)]
     pub fn add_search_path(&mut self, path: impl Into<PathBuf>) {
         self.search_paths.insert(0, path.into());
     }
@@ -203,6 +204,7 @@ impl RoleRegistry {
     }
 
     /// List all available roles
+    #[allow(dead_code)]
     pub fn list_available(&self) -> Vec<String> {
         let mut roles = Vec::new();
 
@@ -226,6 +228,7 @@ impl RoleRegistry {
     }
 
     /// Preload all roles from search paths
+    #[allow(dead_code)]
     pub fn preload_all(&mut self) -> Result<usize> {
         let available = self.list_available();
         let mut loaded = 0;
@@ -385,7 +388,7 @@ max_iterations = 5
 
     #[test]
     fn test_role_registry() {
-        let mut registry = RoleRegistry::new();
+        let registry = RoleRegistry::new();
 
         // Built-in roles should be findable through the registry
         // (In production, these would be loaded from files)

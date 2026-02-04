@@ -37,6 +37,7 @@ impl OllamaProvider {
     }
 }
 
+#[allow(dead_code)]
 fn get_model_capabilities(model: &str) -> ProviderCapabilities {
     // Capabilities vary by model - these are reasonable defaults
     let (context_tokens, output_tokens) = if model.contains("llama3") {

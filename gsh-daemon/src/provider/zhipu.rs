@@ -35,6 +35,7 @@ impl ZhipuProvider {
     }
 }
 
+#[allow(dead_code)]
 fn get_model_capabilities(model: &str) -> ProviderCapabilities {
     // GLM model capabilities (case-insensitive check)
     let model_lower = model.to_lowercase();
@@ -111,6 +112,7 @@ struct ZhipuFunction {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ZhipuResponse {
     choices: Vec<ZhipuChoice>,
     model: Option<String>,
@@ -148,6 +150,7 @@ impl From<ZhipuUsage> for UsageStats {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ZhipuChoice {
     message: ZhipuMessage,
     finish_reason: Option<String>,

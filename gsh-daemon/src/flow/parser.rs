@@ -20,6 +20,7 @@ pub enum FlowParseError {
     ValidationError(#[from] FlowValidationError),
 
     #[error("Missing required field: {0}")]
+    #[allow(dead_code)]
     MissingField(String),
 
     #[error("Invalid next node specification in node '{node}': {message}")]
@@ -402,7 +403,7 @@ environment = "dev"
 
 [nodes.start]
 name = "Start"
-next = "end"
+next = "error_handler"
 
 [nodes.error_handler]
 name = "Error Handler"

@@ -20,6 +20,7 @@ pub struct AnthropicProvider {
 }
 
 /// Model capability information for Anthropic models
+#[allow(dead_code)]
 fn get_model_capabilities(model: &str) -> ProviderCapabilities {
     // Context windows and capabilities for known Anthropic models
     // as of early 2025
@@ -97,6 +98,7 @@ struct AnthropicTool {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AnthropicResponse {
     content: Vec<AnthropicContentBlock>,
     stop_reason: Option<String>,
@@ -162,6 +164,7 @@ impl AnthropicErrorResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AnthropicStreamEvent {
     #[serde(rename = "type")]
     event_type: String,
@@ -174,6 +177,7 @@ struct AnthropicStreamEvent {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AnthropicDelta {
     #[serde(rename = "type")]
     delta_type: Option<String>,
@@ -482,5 +486,256 @@ fn parse_sse_event(event_str: &str) -> Option<StreamEvent> {
             Some(StreamEvent::Error(ProviderError::Other(data)))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // =========================================================================
+    // Message Conversion Tests
+    // =========================================================================
+    // These tests verify that our internal message types correctly convert to
+    // and from Anthropic's API format. This is critical because:
+    // 1. Incorrect conversion = API errors or lost data
+    // 2. The conversion logic handles multiple message formats (text vs blocks)
+    // 3. Tool use/results must preserve all fields exactly
+
+    #[test]
+    fn test_user_message_text_conversion() {
+        // Simple text messages should convert to Anthropic's format
+        let msg = ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::Text("Hello, Claude!".to_string()),
+        };
+
+        let anthropic_msg: AnthropicMessage = (&msg).into();
+
+        assert_eq!(anthropic_msg.role, "user");
+        match anthropic_msg.content {
+            AnthropicContent::Text(text) => assert_eq!(text, "Hello, Claude!"),
+            _ => panic!("Expected text content"),
+        }
+    }
+
+    #[test]
+    fn test_assistant_message_conversion() {
+        // Assistant messages use "assistant" role in Anthropic API
+        let msg = ChatMessage {
+            role: ChatRole::Assistant,
+            content: MessageContent::Text("I'm here to help.".to_string()),
+        };
+
+        let anthropic_msg: AnthropicMessage = (&msg).into();
+
+        assert_eq!(anthropic_msg.role, "assistant");
+    }
+
+    #[test]
+    fn test_tool_use_block_conversion() {
+        // Tool use blocks must preserve id, name, and input exactly
+        // The LLM generates these, and we send them back as tool_result
+        let block = ContentBlock::ToolUse {
+            id: "toolu_123".to_string(),
+            name: "bash".to_string(),
+            input: serde_json::json!({"command": "ls -la"}),
+        };
+
+        let anthropic_block: AnthropicContentBlock = (&block).into();
+
+        match anthropic_block {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_123");
+                assert_eq!(name, "bash");
+                assert_eq!(input["command"], "ls -la");
+            }
+            _ => panic!("Expected ToolUse block"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_block_conversion() {
+        // Tool results link back to the original tool_use via tool_use_id
+        // is_error flag tells the LLM if the tool execution failed
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_123".to_string(),
+            content: "file1.txt\nfile2.txt".to_string(),
+            is_error: Some(false),
+        };
+
+        let anthropic_block: AnthropicContentBlock = (&block).into();
+
+        match anthropic_block {
+            AnthropicContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                assert_eq!(tool_use_id, "toolu_123");
+                assert_eq!(content, "file1.txt\nfile2.txt");
+                assert_eq!(is_error, Some(false));
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_error_flag() {
+        // When a tool fails, is_error=true helps the LLM understand and recover
+        let block = ContentBlock::ToolResult {
+            tool_use_id: "toolu_456".to_string(),
+            content: "Error: file not found".to_string(),
+            is_error: Some(true),
+        };
+
+        let anthropic_block: AnthropicContentBlock = (&block).into();
+
+        match anthropic_block {
+            AnthropicContentBlock::ToolResult { is_error, .. } => {
+                assert_eq!(is_error, Some(true));
+            }
+            _ => panic!("Expected ToolResult block"),
+        }
+    }
+
+    #[test]
+    fn test_message_with_multiple_blocks() {
+        // Messages can contain multiple content blocks (text + tool use)
+        // This happens when the LLM explains what it's doing AND calls a tool
+        let blocks = vec![
+            ContentBlock::Text { text: "Let me check that for you.".to_string() },
+            ContentBlock::ToolUse {
+                id: "toolu_789".to_string(),
+                name: "read_file".to_string(),
+                input: serde_json::json!({"path": "/etc/hosts"}),
+            },
+        ];
+
+        let msg = ChatMessage {
+            role: ChatRole::Assistant,
+            content: MessageContent::Blocks(blocks),
+        };
+
+        let anthropic_msg: AnthropicMessage = (&msg).into();
+
+        match anthropic_msg.content {
+            AnthropicContent::Blocks(blocks) => {
+                assert_eq!(blocks.len(), 2);
+                assert!(matches!(&blocks[0], AnthropicContentBlock::Text { .. }));
+                assert!(matches!(&blocks[1], AnthropicContentBlock::ToolUse { .. }));
+            }
+            _ => panic!("Expected blocks content"),
+        }
+    }
+
+    // =========================================================================
+    // Tool Definition Conversion Tests
+    // =========================================================================
+    // Tools define what capabilities the LLM can use. The schema must be
+    // valid JSON Schema for the API to accept it.
+
+    #[test]
+    fn test_tool_definition_conversion() {
+        let tool = ToolDefinition {
+            name: "execute_command".to_string(),
+            description: "Run a shell command".to_string(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The command to execute"
+                    }
+                },
+                "required": ["command"]
+            }),
+        };
+
+        let anthropic_tool: AnthropicTool = (&tool).into();
+
+        assert_eq!(anthropic_tool.name, "execute_command");
+        assert_eq!(anthropic_tool.description, "Run a shell command");
+        assert!(anthropic_tool.input_schema["properties"]["command"].is_object());
+    }
+
+    // =========================================================================
+    // Round-trip Conversion Tests
+    // =========================================================================
+    // These test that data survives conversion to Anthropic format and back.
+    // Important for when we receive responses and convert them to our format.
+
+    #[test]
+    fn test_content_block_roundtrip() {
+        // Text block should survive round-trip unchanged
+        let original = ContentBlock::Text { text: "Hello world".to_string() };
+        let anthropic: AnthropicContentBlock = (&original).into();
+        let back: ContentBlock = anthropic.into();
+
+        match back {
+            ContentBlock::Text { text } => assert_eq!(text, "Hello world"),
+            _ => panic!("Round-trip failed"),
+        }
+    }
+
+    #[test]
+    fn test_tool_use_roundtrip() {
+        // Tool use with complex JSON input should survive round-trip
+        let original = ContentBlock::ToolUse {
+            id: "toolu_abc".to_string(),
+            name: "search".to_string(),
+            input: serde_json::json!({
+                "query": "rust async",
+                "limit": 10,
+                "filters": ["docs", "examples"]
+            }),
+        };
+
+        let anthropic: AnthropicContentBlock = (&original).into();
+        let back: ContentBlock = anthropic.into();
+
+        match back {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_abc");
+                assert_eq!(name, "search");
+                assert_eq!(input["query"], "rust async");
+                assert_eq!(input["limit"], 10);
+            }
+            _ => panic!("Round-trip failed"),
+        }
+    }
+
+    // =========================================================================
+    // Usage Statistics Tests
+    // =========================================================================
+
+    #[test]
+    fn test_usage_stats_conversion() {
+        // Anthropic returns usage with cache tokens; we convert to our format
+        let anthropic_usage = AnthropicUsage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_creation_input_tokens: Some(20),
+            cache_read_input_tokens: Some(80),
+        };
+
+        let usage: UsageStats = anthropic_usage.into();
+
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 50);
+        assert_eq!(usage.total_tokens, 150);
+        assert_eq!(usage.cache_creation_tokens, Some(20));
+        assert_eq!(usage.cache_read_tokens, Some(80));
+    }
+
+    // =========================================================================
+    // Provider Instance Tests
+    // =========================================================================
+
+    #[test]
+    fn test_provider_name_and_model() {
+        let provider = AnthropicProvider::new(
+            "test-api-key".to_string(),
+            "claude-sonnet-4-20250514".to_string(),
+        );
+
+        assert_eq!(provider.name(), "anthropic");
+        assert_eq!(provider.model(), "claude-sonnet-4-20250514");
     }
 }

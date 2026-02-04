@@ -33,6 +33,7 @@ impl OpenAIProvider {
 }
 
 /// Get model capabilities for OpenAI models
+#[allow(dead_code)]
 fn get_model_capabilities(model: &str) -> ProviderCapabilities {
     // Context windows and capabilities for known OpenAI models
     let (context_tokens, output_tokens, supports_vision) = if model.contains("gpt-4o") {
@@ -112,6 +113,7 @@ struct OpenAIFunction {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIResponse {
     choices: Vec<OpenAIChoice>,
     model: Option<String>,
@@ -138,17 +140,20 @@ impl From<OpenAIUsage> for UsageStats {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIChoice {
     message: OpenAIMessage,
     finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIErrorResponse {
     error: OpenAIError,
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct OpenAIError {
     message: String,
     #[serde(rename = "type")]
@@ -156,6 +161,7 @@ struct OpenAIError {
     code: Option<String>,
 }
 
+#[allow(dead_code)]
 impl OpenAIErrorResponse {
     fn into_provider_error(self, status_code: u16) -> ProviderError {
         let msg = self.error.message;

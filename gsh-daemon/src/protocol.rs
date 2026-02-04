@@ -135,6 +135,7 @@ pub struct AgentInfo {
 
 /// A complete request-response pair for the protocol
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ProtocolMessage {
     pub id: String,
     #[serde(flatten)]
@@ -143,6 +144,7 @@ pub struct ProtocolMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(dead_code)]
 pub enum ProtocolPayload {
     Shell(ShellMessage),
     Daemon(DaemonMessage),

@@ -526,7 +526,7 @@ async fn run_flow(
     writer: &mut tokio::net::unix::OwnedWriteHalf,
 ) -> Result<Option<DaemonMessage>> {
     use flow::engine::{FlowEngine, FlowEvent};
-    use std::path::Path;
+    
 
     // Find flow file
     let flow_path = find_flow_file(flow_name)?;

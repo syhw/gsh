@@ -35,6 +35,7 @@ impl MoonshotProvider {
     }
 }
 
+#[allow(dead_code)]
 fn get_model_capabilities(model: &str) -> ProviderCapabilities {
     // Kimi K2.5 capabilities
     let (context_tokens, output_tokens, supports_vision) = if model.contains("k2") {
@@ -111,6 +112,7 @@ struct MoonshotFunction {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct MoonshotResponse {
     choices: Vec<MoonshotChoice>,
     model: Option<String>,
@@ -137,6 +139,7 @@ impl From<MoonshotUsage> for UsageStats {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct MoonshotChoice {
     message: MoonshotMessage,
     finish_reason: Option<String>,

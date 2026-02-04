@@ -17,6 +17,7 @@ use futures::Stream;
 
 /// Errors that can occur during provider operations
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum ProviderError {
     /// Authentication failed (invalid API key, etc.)
     AuthenticationError(String),
@@ -77,6 +78,7 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
+#[allow(dead_code)]
 impl ProviderError {
     /// Returns true if this error is retryable
     pub fn is_retryable(&self) -> bool {
@@ -105,6 +107,7 @@ impl ProviderError {
 
 /// Capabilities supported by a provider
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct ProviderCapabilities {
     /// Whether the provider supports tool/function calling
     pub supports_tools: bool,
@@ -126,6 +129,7 @@ pub struct ProviderCapabilities {
 
 /// Information about the model being used
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ModelInfo {
     /// Model identifier (e.g., "claude-sonnet-4-20250514")
     pub id: String,
@@ -203,6 +207,7 @@ pub enum MessageContent {
     Blocks(Vec<ContentBlock>),
 }
 
+#[allow(dead_code)]
 impl MessageContent {
     pub fn text(s: impl Into<String>) -> Self {
         Self::Text(s.into())
@@ -276,6 +281,7 @@ pub enum ContentBlock {
 
 /// Response from a chat completion
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ChatResponse {
     /// The response message
     pub message: ChatMessage,
@@ -287,6 +293,7 @@ pub struct ChatResponse {
     pub model: Option<String>,
 }
 
+#[allow(dead_code)]
 impl ChatResponse {
     /// Create a simple response with just a message
     pub fn from_message(message: ChatMessage) -> Self {
@@ -307,6 +314,7 @@ impl ChatResponse {
 
 /// Streaming event from the provider
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum StreamEvent {
     /// Text content delta
     TextDelta(String),
@@ -324,6 +332,7 @@ pub enum StreamEvent {
 }
 
 // For backward compatibility
+#[allow(dead_code)]
 impl StreamEvent {
     /// Create a simple message complete event (for backward compatibility)
     pub fn message_complete() -> Self {
@@ -344,6 +353,7 @@ impl StreamEvent {
 /// It supports both synchronous and streaming chat completions, as well as
 /// capability introspection and model information.
 #[async_trait]
+#[allow(dead_code)]
 pub trait Provider: Send + Sync {
     /// Get the provider name (e.g., "anthropic", "openai")
     fn name(&self) -> &str;

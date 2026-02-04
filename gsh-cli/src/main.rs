@@ -112,6 +112,7 @@ enum ShellMessage {
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)]
 enum DaemonMessage {
     Ack,
     Pong { uptime_secs: u64, version: String },
@@ -126,6 +127,7 @@ enum DaemonMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct AgentInfo {
     agent_id: u64,
     session_name: String,
@@ -299,10 +301,10 @@ async fn run_prompt(
                     break;
                 }
             }
-            DaemonMessage::ToolUse { tool, input } => {
+            DaemonMessage::ToolUse { tool, input: _ } => {
                 eprintln!("\n[Using tool: {}]", tool);
             }
-            DaemonMessage::ToolResult { tool, output, success } => {
+            DaemonMessage::ToolResult { tool, output: _, success } => {
                 let status = if success { "OK" } else { "FAILED" };
                 eprintln!("[Tool {} {}]", tool, status);
             }

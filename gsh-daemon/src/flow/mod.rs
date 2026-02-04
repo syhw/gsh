@@ -393,6 +393,7 @@ impl Flow {
     }
 
     /// Get all node IDs
+    #[allow(dead_code)]
     pub fn node_ids(&self) -> impl Iterator<Item = &str> {
         self.nodes.keys().map(|s| s.as_str())
     }
@@ -403,6 +404,7 @@ impl Flow {
     }
 
     /// Get the entry node
+    #[allow(dead_code)]
     pub fn entry_node(&self) -> Option<&AgentNode> {
         self.nodes.get(&self.entry)
     }
@@ -438,6 +440,7 @@ pub enum FlowValidationError {
     UnreachableNodes(Vec<String>),
 }
 
+#[allow(dead_code)]
 impl NextNode {
     /// Check if this is an end node
     pub fn is_end(&self) -> bool {
@@ -483,9 +486,12 @@ mod tests {
                 name: "Start".to_string(),
                 description: "Entry point".to_string(),
                 agent_type: "planner".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::Single("process".to_string()),
                 max_iterations: 10,
                 timeout_secs: 0,
@@ -499,9 +505,12 @@ mod tests {
                 name: "Process".to_string(),
                 description: "Main processing".to_string(),
                 agent_type: "coder".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec!["bash".to_string(), "write".to_string()],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::End,
                 max_iterations: 10,
                 timeout_secs: 60,
@@ -553,9 +562,12 @@ mod tests {
                 name: "A".to_string(),
                 description: "".to_string(),
                 agent_type: "general".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::Single("b".to_string()),
                 max_iterations: 10,
                 timeout_secs: 0,
@@ -569,9 +581,12 @@ mod tests {
                 name: "B".to_string(),
                 description: "".to_string(),
                 agent_type: "general".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::Single("c".to_string()),
                 max_iterations: 10,
                 timeout_secs: 0,
@@ -585,9 +600,12 @@ mod tests {
                 name: "C".to_string(),
                 description: "".to_string(),
                 agent_type: "general".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::Single("a".to_string()), // Cycle back to a
                 max_iterations: 10,
                 timeout_secs: 0,
@@ -618,9 +636,12 @@ mod tests {
                 name: "Orphan".to_string(),
                 description: "".to_string(),
                 agent_type: "general".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::End,
                 max_iterations: 10,
                 timeout_secs: 0,
@@ -658,9 +679,12 @@ mod tests {
                 name: "Parallel Task".to_string(),
                 description: "".to_string(),
                 agent_type: "general".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::End,
                 max_iterations: 10,
                 timeout_secs: 0,
@@ -676,9 +700,12 @@ mod tests {
                 name: "Join".to_string(),
                 description: "".to_string(),
                 agent_type: "general".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::End,
                 max_iterations: 10,
                 timeout_secs: 0,

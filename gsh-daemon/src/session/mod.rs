@@ -69,6 +69,7 @@ impl Session {
         self.last_activity = Utc::now();
     }
 
+    #[allow(dead_code)]
     pub fn add_system_message(&mut self, content: String) {
         self.messages.push(Message {
             role: MessageRole::System,
@@ -77,10 +78,12 @@ impl Session {
         });
     }
 
+    #[allow(dead_code)]
     pub fn update_cwd(&mut self, cwd: String) {
         self.cwd = cwd;
     }
 
+    #[allow(dead_code)]
     pub fn message_count(&self) -> usize {
         self.messages.len()
     }

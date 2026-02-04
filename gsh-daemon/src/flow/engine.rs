@@ -77,6 +77,7 @@ pub enum FlowEvent {
 
 /// Result of a single node execution
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct NodeResult {
     pub node_id: String,
     pub output: String,
@@ -151,11 +152,13 @@ impl FlowEngine {
     }
 
     /// Set provider override for a specific node
+    #[allow(dead_code)]
     pub fn set_node_provider(&mut self, node_id: &str, provider: &str) {
         self.provider_overrides.insert(node_id.to_string(), provider.to_string());
     }
 
     /// Set model override for a specific node
+    #[allow(dead_code)]
     pub fn set_node_model(&mut self, node_id: &str, model: &str) {
         self.model_overrides.insert(node_id.to_string(), model.to_string());
     }
@@ -247,7 +250,7 @@ impl FlowEngine {
         ctx: Arc<RwLock<FlowContext>>,
         event_tx: &mpsc::Sender<FlowEvent>,
     ) -> Result<String> {
-        use super::roles::Role;
+        
 
         let node = flow.get_node(node_id)
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", node_id))?;
@@ -604,6 +607,7 @@ mod tests {
         Config::default()
     }
 
+    #[allow(dead_code)]
     fn simple_flow() -> Flow {
         let mut nodes = HashMap::new();
         nodes.insert(
@@ -612,9 +616,12 @@ mod tests {
                 name: "Start".to_string(),
                 description: "Entry point".to_string(),
                 agent_type: "general".to_string(),
+                role: None,
                 system_prompt: None,
                 allowed_tools: vec![],
                 denied_tools: vec![],
+                provider: None,
+                model: None,
                 next: NextNode::End,
                 max_iterations: 10,
                 timeout_secs: 0,

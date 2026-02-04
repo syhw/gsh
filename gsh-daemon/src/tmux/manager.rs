@@ -57,6 +57,7 @@ pub struct SubagentInfo {
 
 /// Handle to a spawned agent session
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AgentHandle {
     /// Unique agent ID
     pub id: u64,
@@ -90,6 +91,7 @@ impl TmuxManager {
     }
 
     /// Create a TmuxManager with custom configuration
+    #[allow(dead_code)]
     pub fn with_config(session_prefix: &str, daemon_socket: Option<&str>) -> Self {
         Self {
             session_prefix: session_prefix.to_string(),
@@ -109,11 +111,13 @@ impl TmuxManager {
     }
 
     /// Check if we're currently inside a tmux session
+    #[allow(dead_code)]
     pub fn is_inside_tmux() -> bool {
         std::env::var("TMUX").is_ok()
     }
 
     /// Get the tmux version
+    #[allow(dead_code)]
     pub fn version() -> Option<String> {
         Command::new("tmux")
             .arg("-V")
@@ -275,6 +279,7 @@ impl TmuxManager {
     ///
     /// If already inside tmux, this will switch clients. Otherwise, it will
     /// attach to the session.
+    #[allow(dead_code)]
     pub fn attach(&self, session: &str) -> Result<()> {
         if Self::is_inside_tmux() {
             // Use switch-client when already in tmux
@@ -311,6 +316,7 @@ impl TmuxManager {
     ///
     /// Captures the visible content of the pane, optionally including
     /// scrollback history.
+    #[allow(dead_code)]
     pub fn pipe_output(&self, session: &str, include_history: bool) -> Result<String> {
         let mut cmd = Command::new("tmux");
         cmd.arg("capture-pane")
@@ -336,6 +342,7 @@ impl TmuxManager {
     /// Pipe output to a file or command
     ///
     /// Uses tmux's pipe-pane feature to redirect output.
+    #[allow(dead_code)]
     pub fn pipe_output_to(&self, session: &str, target: &str) -> Result<()> {
         let output = Command::new("tmux")
             .arg("pipe-pane")
@@ -354,6 +361,7 @@ impl TmuxManager {
     }
 
     /// Stop piping output (disable pipe-pane)
+    #[allow(dead_code)]
     pub fn stop_pipe_output(&self, session: &str) -> Result<()> {
         let output = Command::new("tmux")
             .arg("pipe-pane")
@@ -379,6 +387,7 @@ impl TmuxManager {
     }
 
     /// Send keys without adding Enter at the end
+    #[allow(dead_code)]
     pub fn send_keys_no_enter(&self, session: &str, keys: &str) -> Result<()> {
         self.send_keys_raw(session, keys, false)
     }
@@ -403,6 +412,7 @@ impl TmuxManager {
     }
 
     /// Send a control character to the session
+    #[allow(dead_code)]
     pub fn send_control(&self, session: &str, key: char) -> Result<()> {
         let ctrl_key = format!("C-{}", key);
         let output = Command::new("tmux")
@@ -455,6 +465,7 @@ impl TmuxManager {
     }
 
     /// Kill all agent sessions
+    #[allow(dead_code)]
     pub fn kill_all_agents(&self) -> Result<usize> {
         let agents = self.list_subagents()?;
         let count = agents.len();
@@ -474,6 +485,7 @@ impl TmuxManager {
     }
 
     /// Check if a session exists
+    #[allow(dead_code)]
     pub fn session_exists(&self, session: &str) -> bool {
         Command::new("tmux")
             .arg("has-session")
@@ -485,12 +497,14 @@ impl TmuxManager {
     }
 
     /// Get information about a specific session
+    #[allow(dead_code)]
     pub fn get_session_info(&self, session: &str) -> Result<Option<SubagentInfo>> {
         let agents = self.list_subagents()?;
         Ok(agents.into_iter().find(|a| a.session_name == session))
     }
 
     /// Create a new window in an existing session
+    #[allow(dead_code)]
     pub fn new_window(&self, session: &str, name: Option<&str>, command: Option<&str>) -> Result<()> {
         let mut cmd = Command::new("tmux");
         cmd.arg("new-window").arg("-t").arg(session);
@@ -517,6 +531,7 @@ impl TmuxManager {
     ///
     /// This is useful for waiting for an agent command to complete.
     /// Returns the final output of the pane.
+    #[allow(dead_code)]
     pub fn wait_for_completion(&self, session: &str, timeout_secs: u64) -> Result<String> {
         use std::time::{Duration, Instant};
 
@@ -553,6 +568,7 @@ impl TmuxManager {
     }
 
     /// Get the session prefix
+    #[allow(dead_code)]
     pub fn prefix(&self) -> &str {
         &self.session_prefix
     }
@@ -599,7 +615,7 @@ mod tests {
         let manager = TmuxManager::new();
 
         // Test that session names get the correct prefix
-        let config = AgentSessionConfig {
+        let _config = AgentSessionConfig {
             name: Some("test-agent".to_string()),
             ..Default::default()
         };
