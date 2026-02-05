@@ -45,7 +45,7 @@ enum Commands {
     /// Open the observability dashboard
     Dashboard {
         /// Custom log directory
-        #[arg(short, long)]
+        #[arg(short = 'd', long)]
         log_dir: Option<PathBuf>,
     },
 }
