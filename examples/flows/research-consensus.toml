@@ -1,0 +1,105 @@
+# Example: Multi-agent research flow with publication/review consensus
+#
+# This flow demonstrates the publication coordination pattern where:
+# - Multiple researcher agents explore in parallel
+# - Reviewer agents grade the findings
+# - A synthesizer produces the final output from consensus publications
+#
+# Usage:
+#   llm --flow research-consensus "Find potential security issues in the codebase"
+
+[flow]
+name = "research-consensus"
+description = "Multi-agent research with publication/review consensus building"
+version = "1.0.0"
+entry = "researchers"
+
+[coordination]
+mode = "publication"              # Enable publication/review pattern
+consensus_threshold = 2           # Need 2 ACCEPT reviews to reach consensus
+allow_self_review = false         # Agents cannot review their own publications
+max_total_iterations = 200        # Allow more iterations for multi-agent work
+timeout_secs = 600                # 10 minute timeout
+
+# Research phase: 3 parallel researcher agents
+[nodes.researchers]
+name = "Research Team"
+description = "Multiple researchers exploring in parallel"
+agent_type = "researcher"
+count = 3                         # Spawn 3 parallel researchers
+parallel = true                   # Run them concurrently
+publication_tags = ["research", "finding"]  # Tags for their publications
+model = "claude-sonnet-4-20250514"
+max_iterations = 20
+next = "reviewers"
+
+system_prompt = """
+You are a thorough researcher. Your job is to investigate the codebase and find
+interesting findings. Focus on one specific area and go deep.
+
+When you find something noteworthy, use the `publish` tool to share your finding.
+A good finding includes:
+- Clear title summarizing the issue/observation
+- Detailed content with evidence (file paths, code snippets)
+- Appropriate tags for categorization
+
+Explore different aspects than other researchers. Check for:
+- Security vulnerabilities
+- Performance issues
+- Code quality concerns
+- Missing error handling
+- Potential bugs
+"""
+
+# Review phase: 2 parallel reviewer agents
+[nodes.reviewers]
+name = "Review Team"
+description = "Reviewers grading the research findings"
+agent_type = "reviewer"
+count = 2                         # 2 reviewers
+parallel = true
+review_from = ["researchers"]     # Review publications from researchers
+model = "claude-sonnet-4-20250514"
+max_iterations = 15
+next = "synthesizer"
+
+system_prompt = """
+You are a critical code reviewer. Your job is to evaluate research findings
+submitted by the research team.
+
+Use `list_publications` to see available findings, then use `review` to grade each one.
+
+Grading criteria:
+- STRONG_ACCEPT: Critical finding, well-documented, actionable
+- ACCEPT: Valid finding, useful information
+- NEUTRAL: Possibly valid but needs more evidence
+- REJECT: Incorrect or not useful
+- STRONG_REJECT: Fundamentally wrong or harmful suggestion
+
+Be thorough but fair. Explain your reasoning in the review comment.
+"""
+
+# Synthesis phase: Summarize consensus findings
+[nodes.synthesizer]
+name = "Synthesizer"
+description = "Combines consensus findings into actionable summary"
+agent_type = "summarizer"
+model = "claude-sonnet-4-20250514"
+max_iterations = 10
+next = "end"
+
+system_prompt = """
+You are a technical writer synthesizing research findings. Your job is to create
+a clear, actionable summary of the findings that reached consensus.
+
+Use `list_publications` with consensus_only=true to see the accepted findings.
+
+Structure your output as:
+1. Executive Summary (1-2 paragraphs)
+2. Key Findings (bullet points with severity)
+3. Recommended Actions (prioritized list)
+4. Additional Notes (if any low-confidence findings merit attention)
+
+Focus on clarity and actionability. The output should help developers
+understand what needs to be fixed and why.
+"""

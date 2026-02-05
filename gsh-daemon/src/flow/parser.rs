@@ -3,7 +3,7 @@
 //! This module handles parsing flow definitions from TOML files.
 //! It supports the full flow schema and provides detailed error messages.
 
-use super::{AgentNode, Coordination, ErrorHandling, Flow, FlowValidationError, NextNode};
+use super::{AgentNode, Coordination, CoordinationMode, ErrorHandling, Flow, FlowValidationError, NextNode};
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -56,8 +56,11 @@ fn default_version() -> String {
     "0.1.0".to_string()
 }
 
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(Debug, serde::Deserialize)]
 struct CoordinationToml {
+    /// Coordination mode: "simple" (default) or "publication"
+    #[serde(default)]
+    mode: CoordinationMode,
     #[serde(default = "default_max_total_iterations")]
     max_total_iterations: usize,
     #[serde(default)]
@@ -68,6 +71,30 @@ struct CoordinationToml {
     shared_context: HashMap<String, String>,
     #[serde(default)]
     error_handling: ErrorHandlingToml,
+    // Publication mode settings
+    #[serde(default = "default_consensus_threshold")]
+    consensus_threshold: usize,
+    #[serde(default)]
+    allow_self_review: bool,
+}
+
+impl Default for CoordinationToml {
+    fn default() -> Self {
+        Self {
+            mode: CoordinationMode::default(),
+            max_total_iterations: default_max_total_iterations(),
+            timeout_secs: 0,
+            allow_parallel: true,
+            shared_context: HashMap::new(),
+            error_handling: ErrorHandlingToml::default(),
+            consensus_threshold: default_consensus_threshold(),
+            allow_self_review: false,
+        }
+    }
+}
+
+fn default_consensus_threshold() -> usize {
+    2
 }
 
 fn default_max_total_iterations() -> usize {
@@ -123,6 +150,24 @@ struct NodeToml {
     // Next node specification - can be various forms
     #[serde(default)]
     next: Option<NextNodeToml>,
+
+    // Publication mode settings
+    /// Number of parallel instances to spawn
+    #[serde(default = "default_count")]
+    count: usize,
+    /// Whether to run instances in parallel
+    #[serde(default)]
+    parallel: bool,
+    /// Node IDs whose publications this agent should review
+    #[serde(default)]
+    review_from: Vec<String>,
+    /// Tags to apply to publications from this node
+    #[serde(default)]
+    publication_tags: Vec<String>,
+}
+
+fn default_count() -> usize {
+    1
 }
 
 fn default_agent_type() -> String {
@@ -193,11 +238,16 @@ fn convert_flow(flow_toml: FlowToml) -> Result<Flow, FlowParseError> {
                 timeout_secs: node_toml.timeout_secs,
                 inputs: node_toml.inputs,
                 outputs: node_toml.outputs,
+                count: node_toml.count,
+                parallel: node_toml.parallel,
+                review_from: node_toml.review_from,
+                publication_tags: node_toml.publication_tags,
             },
         );
     }
 
     let coordination = Coordination {
+        mode: flow_toml.coordination.mode,
         max_total_iterations: flow_toml.coordination.max_total_iterations,
         timeout_secs: flow_toml.coordination.timeout_secs,
         allow_parallel: flow_toml.coordination.allow_parallel,
@@ -208,6 +258,8 @@ fn convert_flow(flow_toml: FlowToml) -> Result<Flow, FlowParseError> {
             retry_delay_ms: flow_toml.coordination.error_handling.retry_delay_ms,
             fail_on_unhandled: flow_toml.coordination.error_handling.fail_on_unhandled,
         },
+        consensus_threshold: flow_toml.coordination.consensus_threshold,
+        allow_self_review: flow_toml.coordination.allow_self_review,
     };
 
     let flow = Flow {
@@ -558,5 +610,77 @@ name = "Start"
         assert!(start.allowed_tools.is_empty());
         assert!(start.denied_tools.is_empty());
         assert!(matches!(start.next, NextNode::End));
+    }
+
+    #[test]
+    fn test_parse_publication_mode() {
+        let toml = r#"
+[flow]
+name = "research-flow"
+description = "Multi-agent research with publication/review"
+entry = "researchers"
+
+[coordination]
+mode = "publication"
+consensus_threshold = 2
+allow_self_review = false
+
+[nodes.researchers]
+name = "Research Team"
+agent_type = "researcher"
+count = 3
+parallel = true
+publication_tags = ["research", "findings"]
+next = "reviewers"
+
+[nodes.reviewers]
+name = "Review Team"
+agent_type = "reviewer"
+count = 2
+parallel = true
+review_from = ["researchers"]
+next = "synthesizer"
+
+[nodes.synthesizer]
+name = "Synthesizer"
+agent_type = "summarizer"
+next = "end"
+"#;
+
+        let flow = parse_flow(toml).unwrap();
+        assert_eq!(flow.name, "research-flow");
+        assert_eq!(flow.coordination.mode, CoordinationMode::Publication);
+        assert_eq!(flow.coordination.consensus_threshold, 2);
+        assert!(!flow.coordination.allow_self_review);
+
+        let researchers = flow.get_node("researchers").unwrap();
+        assert_eq!(researchers.count, 3);
+        assert!(researchers.parallel);
+        assert_eq!(researchers.publication_tags, vec!["research", "findings"]);
+
+        let reviewers = flow.get_node("reviewers").unwrap();
+        assert_eq!(reviewers.count, 2);
+        assert!(reviewers.parallel);
+        assert_eq!(reviewers.review_from, vec!["researchers"]);
+
+        let synthesizer = flow.get_node("synthesizer").unwrap();
+        assert_eq!(synthesizer.count, 1);
+        assert!(!synthesizer.parallel);
+    }
+
+    #[test]
+    fn test_default_coordination_mode() {
+        let toml = r#"
+[flow]
+name = "simple"
+entry = "start"
+
+[nodes.start]
+name = "Start"
+"#;
+
+        let flow = parse_flow(toml).unwrap();
+        assert_eq!(flow.coordination.mode, CoordinationMode::Simple);
+        assert_eq!(flow.coordination.consensus_threshold, 2); // default
     }
 }

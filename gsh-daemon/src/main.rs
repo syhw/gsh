@@ -552,7 +552,7 @@ async fn run_flow(
     info!("Running flow: {} ({} nodes)", flow.name, flow.nodes.len());
 
     // Create flow engine
-    let engine = FlowEngine::new(state.config.clone());
+    let mut engine = FlowEngine::new(state.config.clone());
 
     // Create event channel
     let (event_tx, mut event_rx) = mpsc::channel::<FlowEvent>(100);
@@ -670,6 +670,46 @@ async fn run_flow(
                     message: format!("Flow error{}: {}", node_info, error),
                     code: None,
                 })
+            }
+            // Publication mode events
+            FlowEvent::PublicationCreated { node_id, publication_id, title, author } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: format!(
+                            "[Publication {} by {} (node {}): {}]\n",
+                            publication_id, author, node_id, title
+                        ),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::PublicationReviewed { publication_id, reviewer, grade, consensus_score } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: format!(
+                            "[Review: {} gave {} to {} (score: {})]\n",
+                            reviewer, grade, publication_id, consensus_score
+                        ),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
+            FlowEvent::PublicationConsensus { publication_id, title, accept_count } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: format!(
+                            "[CONSENSUS REACHED: {} - '{}' ({} accepts)]\n",
+                            publication_id, title, accept_count
+                        ),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
             }
         };
 

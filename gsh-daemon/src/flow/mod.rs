@@ -5,8 +5,12 @@
 
 pub mod engine;
 pub mod parser;
+pub mod pub_tools;
+pub mod publication;
 pub mod roles;
 
+pub use pub_tools::{publication_tool_definitions, PublicationToolHandler, PublicationToolResult};
+pub use publication::{Grade, Publication, PublicationStore, PublicationError, PublicationStats};
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -97,6 +101,28 @@ pub struct AgentNode {
     /// Output variables this node produces (for documentation/validation)
     #[serde(default)]
     pub outputs: Vec<String>,
+
+    // --- Publication mode settings ---
+
+    /// Number of parallel instances to spawn (publication mode, default 1)
+    #[serde(default = "default_instance_count")]
+    pub count: usize,
+
+    /// Whether to run multiple instances in parallel (publication mode)
+    #[serde(default)]
+    pub parallel: bool,
+
+    /// Node IDs whose publications this agent should review (publication mode)
+    #[serde(default)]
+    pub review_from: Vec<String>,
+
+    /// Tags to apply to publications from this node (publication mode)
+    #[serde(default)]
+    pub publication_tags: Vec<String>,
+}
+
+fn default_instance_count() -> usize {
+    1
 }
 
 fn default_agent_type() -> String {
@@ -133,9 +159,24 @@ pub enum NextNode {
     },
 }
 
+/// Coordination mode for the flow
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum CoordinationMode {
+    /// Default sequential/parallel execution with data passing
+    #[default]
+    Simple,
+    /// Publication/review pattern with consensus building
+    Publication,
+}
+
 /// Global coordination settings for the flow
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Coordination {
+    /// Coordination mode (simple or publication)
+    #[serde(default)]
+    pub mode: CoordinationMode,
+
     /// Maximum total iterations across all nodes
     #[serde(default = "default_max_total_iterations")]
     pub max_total_iterations: usize,
@@ -155,6 +196,20 @@ pub struct Coordination {
     /// Shared context that persists across all nodes
     #[serde(default)]
     pub shared_context: HashMap<String, String>,
+
+    // --- Publication mode settings ---
+
+    /// Minimum ACCEPT reviews needed to reach consensus (publication mode only)
+    #[serde(default = "default_consensus_threshold")]
+    pub consensus_threshold: usize,
+
+    /// Whether agents can review their own publications
+    #[serde(default)]
+    pub allow_self_review: bool,
+}
+
+fn default_consensus_threshold() -> usize {
+    2
 }
 
 fn default_max_total_iterations() -> usize {
@@ -478,45 +533,38 @@ impl NextNode {
 mod tests {
     use super::*;
 
+    fn make_node(name: &str, agent_type: &str, next: NextNode) -> AgentNode {
+        AgentNode {
+            name: name.to_string(),
+            description: String::new(),
+            agent_type: agent_type.to_string(),
+            role: None,
+            system_prompt: None,
+            allowed_tools: vec![],
+            denied_tools: vec![],
+            provider: None,
+            model: None,
+            next,
+            max_iterations: 10,
+            timeout_secs: 0,
+            inputs: vec![],
+            outputs: vec![],
+            count: 1,
+            parallel: false,
+            review_from: vec![],
+            publication_tags: vec![],
+        }
+    }
+
     fn simple_flow() -> Flow {
         let mut nodes = HashMap::new();
         nodes.insert(
             "start".to_string(),
-            AgentNode {
-                name: "Start".to_string(),
-                description: "Entry point".to_string(),
-                agent_type: "planner".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec![],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::Single("process".to_string()),
-                max_iterations: 10,
-                timeout_secs: 0,
-                inputs: vec![],
-                outputs: vec!["plan".to_string()],
-            },
+            make_node("Start", "planner", NextNode::Single("process".to_string())),
         );
         nodes.insert(
             "process".to_string(),
-            AgentNode {
-                name: "Process".to_string(),
-                description: "Main processing".to_string(),
-                agent_type: "coder".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec!["bash".to_string(), "write".to_string()],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::End,
-                max_iterations: 10,
-                timeout_secs: 60,
-                inputs: vec!["plan".to_string()],
-                outputs: vec![],
-            },
+            make_node("Process", "coder", NextNode::End),
         );
 
         Flow {
@@ -556,63 +604,9 @@ mod tests {
     #[test]
     fn test_cycle_detection() {
         let mut nodes = HashMap::new();
-        nodes.insert(
-            "a".to_string(),
-            AgentNode {
-                name: "A".to_string(),
-                description: "".to_string(),
-                agent_type: "general".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec![],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::Single("b".to_string()),
-                max_iterations: 10,
-                timeout_secs: 0,
-                inputs: vec![],
-                outputs: vec![],
-            },
-        );
-        nodes.insert(
-            "b".to_string(),
-            AgentNode {
-                name: "B".to_string(),
-                description: "".to_string(),
-                agent_type: "general".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec![],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::Single("c".to_string()),
-                max_iterations: 10,
-                timeout_secs: 0,
-                inputs: vec![],
-                outputs: vec![],
-            },
-        );
-        nodes.insert(
-            "c".to_string(),
-            AgentNode {
-                name: "C".to_string(),
-                description: "".to_string(),
-                agent_type: "general".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec![],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::Single("a".to_string()), // Cycle back to a
-                max_iterations: 10,
-                timeout_secs: 0,
-                inputs: vec![],
-                outputs: vec![],
-            },
-        );
+        nodes.insert("a".to_string(), make_node("A", "general", NextNode::Single("b".to_string())));
+        nodes.insert("b".to_string(), make_node("B", "general", NextNode::Single("c".to_string())));
+        nodes.insert("c".to_string(), make_node("C", "general", NextNode::Single("a".to_string()))); // Cycle back to a
 
         let flow = Flow {
             name: "cyclic".to_string(),
@@ -630,25 +624,7 @@ mod tests {
     #[test]
     fn test_unreachable_nodes() {
         let mut flow = simple_flow();
-        flow.nodes.insert(
-            "orphan".to_string(),
-            AgentNode {
-                name: "Orphan".to_string(),
-                description: "".to_string(),
-                agent_type: "general".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec![],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::End,
-                max_iterations: 10,
-                timeout_secs: 0,
-                inputs: vec![],
-                outputs: vec![],
-            },
-        );
+        flow.nodes.insert("orphan".to_string(), make_node("Orphan", "general", NextNode::End));
 
         let result = flow.validate();
         assert!(matches!(result, Err(FlowValidationError::UnreachableNodes(_))));
@@ -673,46 +649,10 @@ mod tests {
         let mut flow = simple_flow();
 
         // Add another node for parallel execution
-        flow.nodes.insert(
-            "parallel_task".to_string(),
-            AgentNode {
-                name: "Parallel Task".to_string(),
-                description: "".to_string(),
-                agent_type: "general".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec![],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::End,
-                max_iterations: 10,
-                timeout_secs: 0,
-                inputs: vec![],
-                outputs: vec![],
-            },
-        );
+        flow.nodes.insert("parallel_task".to_string(), make_node("Parallel Task", "general", NextNode::End));
 
         // Add a join node
-        flow.nodes.insert(
-            "join".to_string(),
-            AgentNode {
-                name: "Join".to_string(),
-                description: "".to_string(),
-                agent_type: "general".to_string(),
-                role: None,
-                system_prompt: None,
-                allowed_tools: vec![],
-                denied_tools: vec![],
-                provider: None,
-                model: None,
-                next: NextNode::End,
-                max_iterations: 10,
-                timeout_secs: 0,
-                inputs: vec![],
-                outputs: vec![],
-            },
-        );
+        flow.nodes.insert("join".to_string(), make_node("Join", "general", NextNode::End));
 
         if let Some(node) = flow.nodes.get_mut("start") {
             node.next = NextNode::Parallel {

@@ -3,7 +3,7 @@
 //! Executes multi-agent flows by orchestrating agents across tmux sessions,
 //! handling conditional routing, parallel execution, and context passing.
 
-use super::{Flow, NextNode};
+use super::{CoordinationMode, Flow, NextNode, PublicationStore};
 use crate::agent::{Agent, AgentEvent};
 use crate::config::Config;
 use crate::provider::{self};
@@ -73,6 +73,27 @@ pub enum FlowEvent {
         node_id: Option<String>,
         error: String,
     },
+    // --- Publication mode events ---
+    /// A publication was submitted
+    PublicationCreated {
+        node_id: String,
+        publication_id: String,
+        title: String,
+        author: String,
+    },
+    /// A publication was reviewed
+    PublicationReviewed {
+        publication_id: String,
+        reviewer: String,
+        grade: String,
+        consensus_score: i32,
+    },
+    /// A publication reached consensus
+    PublicationConsensus {
+        publication_id: String,
+        title: String,
+        accept_count: usize,
+    },
 }
 
 /// Result of a single node execution
@@ -139,6 +160,8 @@ pub struct FlowEngine {
     provider_overrides: HashMap<String, String>,
     /// Model overrides per node (node_id -> model_name)
     model_overrides: HashMap<String, String>,
+    /// Publication store for publication coordination mode
+    publication_store: Option<Arc<PublicationStore>>,
 }
 
 impl FlowEngine {
@@ -148,7 +171,24 @@ impl FlowEngine {
             tmux_manager: TmuxManager::new(),
             provider_overrides: HashMap::new(),
             model_overrides: HashMap::new(),
+            publication_store: None,
         }
+    }
+
+    /// Create a flow engine with publication mode support
+    pub fn with_publication_mode(config: Config, consensus_threshold: usize) -> Self {
+        Self {
+            config,
+            tmux_manager: TmuxManager::new(),
+            provider_overrides: HashMap::new(),
+            model_overrides: HashMap::new(),
+            publication_store: Some(Arc::new(PublicationStore::new(consensus_threshold))),
+        }
+    }
+
+    /// Get the publication store (if in publication mode)
+    pub fn publication_store(&self) -> Option<Arc<PublicationStore>> {
+        self.publication_store.clone()
     }
 
     /// Set provider override for a specific node
@@ -203,7 +243,7 @@ impl FlowEngine {
 
     /// Execute a flow
     pub async fn run(
-        &self,
+        &mut self,
         flow: &Flow,
         input: &str,
         cwd: &str,
@@ -211,6 +251,17 @@ impl FlowEngine {
     ) -> Result<String> {
         // Validate flow first
         flow.validate()?;
+
+        // Initialize publication store if flow uses publication mode
+        if flow.coordination.mode == CoordinationMode::Publication && self.publication_store.is_none() {
+            self.publication_store = Some(Arc::new(PublicationStore::new(
+                flow.coordination.consensus_threshold,
+            )));
+            info!(
+                "Initialized publication mode with consensus threshold: {}",
+                flow.coordination.consensus_threshold
+            );
+        }
 
         let ctx = Arc::new(RwLock::new(FlowContext::new(input.to_string(), cwd.to_string())));
 
@@ -223,6 +274,27 @@ impl FlowEngine {
         let final_output = self
             .execute_node(flow, &flow.entry, ctx.clone(), &event_tx)
             .await?;
+
+        // In publication mode, append consensus summary to output
+        let final_output = if let Some(ref store) = self.publication_store {
+            let stats = store.stats().await;
+            let consensus_pubs = store.consensus_publications().await;
+
+            if !consensus_pubs.is_empty() {
+                let summary = store.format_for_context(&consensus_pubs).await;
+                format!(
+                    "{}\n\n--- Consensus Publications ({}/{} total) ---\n{}",
+                    final_output,
+                    stats.publications_with_consensus,
+                    stats.total_publications,
+                    summary
+                )
+            } else {
+                final_output
+            }
+        } else {
+            final_output
+        };
 
         let _ = event_tx.send(FlowEvent::FlowCompleted {
             final_output: final_output.clone(),
@@ -444,6 +516,7 @@ impl FlowEngine {
             let config_clone = self.config.clone();
             let provider_overrides = self.provider_overrides.clone();
             let model_overrides = self.model_overrides.clone();
+            let publication_store = self.publication_store.clone();
 
             let handle = tokio::spawn(async move {
                 // Create a sub-engine for parallel execution
@@ -452,6 +525,7 @@ impl FlowEngine {
                     tmux_manager: TmuxManager::new(),
                     provider_overrides,
                     model_overrides,
+                    publication_store,
                 };
 
                 let _node = flow_clone.get_node(&node_id_clone)
@@ -627,6 +701,10 @@ mod tests {
                 timeout_secs: 0,
                 inputs: vec![],
                 outputs: vec![],
+                count: 1,
+                parallel: false,
+                review_from: vec![],
+                publication_tags: vec![],
             },
         );
 
