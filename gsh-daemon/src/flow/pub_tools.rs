@@ -7,6 +7,9 @@
 //! - Search for relevant publications
 
 use super::publication::{Grade, PublicationStore};
+use crate::agent::CustomToolHandler;
+use crate::provider::ToolDefinition;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -420,6 +423,33 @@ impl PublicationToolHandler {
             name,
             "publish" | "cite" | "review" | "search_publications" | "get_publication" | "list_publications"
         )
+    }
+}
+
+/// Implement CustomToolHandler trait for integration with Agent
+#[async_trait]
+impl CustomToolHandler for PublicationToolHandler {
+    fn handles(&self, tool_name: &str) -> bool {
+        Self::is_publication_tool(tool_name)
+    }
+
+    async fn execute(&self, tool_name: &str, input: &Value) -> crate::agent::CustomToolResult {
+        let result = self.execute(tool_name, input).await;
+        crate::agent::CustomToolResult {
+            output: serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.message.clone()),
+            success: result.success,
+        }
+    }
+
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        publication_tool_definitions()
+            .into_iter()
+            .map(|def| ToolDefinition {
+                name: def["name"].as_str().unwrap_or("").to_string(),
+                description: def["description"].as_str().unwrap_or("").to_string(),
+                input_schema: def["input_schema"].clone(),
+            })
+            .collect()
     }
 }
 

@@ -1,0 +1,65 @@
+# Simple publication mode test flow
+#
+# A minimal flow to test publication/review coordination with 2 researchers and 1 synthesizer.
+# Use this for quick testing before running more complex flows.
+#
+# Usage:
+#   llm --flow simple-pub-test "Analyze the main.rs file and publish findings"
+
+[flow]
+name = "simple-pub-test"
+description = "Minimal test for publication coordination"
+version = "1.0.0"
+entry = "researchers"
+
+[coordination]
+mode = "publication"
+consensus_threshold = 1    # Only need 1 accept for testing
+allow_self_review = false
+max_total_iterations = 50
+timeout_secs = 300
+
+# Two parallel researchers
+[nodes.researchers]
+name = "Researchers"
+description = "Find interesting things in the codebase"
+count = 2
+parallel = true
+publication_tags = ["finding"]
+max_iterations = 10
+next = "synthesizer"
+
+system_prompt = """
+You are a code analyst. Analyze the specified files and publish your findings.
+
+IMPORTANT: You MUST use the `publish` tool to share your findings.
+Each finding should have:
+- A clear title (short summary)
+- Detailed content explaining what you found
+- Relevant tags
+
+Look for:
+- Code patterns or anti-patterns
+- Potential improvements
+- Interesting design decisions
+
+After publishing 1-2 findings, you can stop.
+"""
+
+# Synthesizer sees publications and creates summary
+[nodes.synthesizer]
+name = "Synthesizer"
+description = "Summarize published findings"
+max_iterations = 5
+next = "end"
+
+system_prompt = """
+You are a technical writer. Your job is to summarize the research findings.
+
+Use `list_publications` to see all findings, then write a brief summary.
+
+Structure:
+1. Overview (1 sentence)
+2. Key findings (bullet points)
+3. Any patterns observed
+"""

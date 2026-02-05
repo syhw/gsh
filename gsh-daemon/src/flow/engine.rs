@@ -3,7 +3,7 @@
 //! Executes multi-agent flows by orchestrating agents across tmux sessions,
 //! handling conditional routing, parallel execution, and context passing.
 
-use super::{CoordinationMode, Flow, NextNode, PublicationStore};
+use super::{CoordinationMode, Flow, NextNode, PublicationStore, PublicationToolHandler};
 use crate::agent::{Agent, AgentEvent};
 use crate::config::Config;
 use crate::provider::{self};
@@ -391,11 +391,23 @@ impl FlowEngine {
         };
 
         // Create agent with node-specific configuration
-        let agent = Agent::new(
+        let mut agent = Agent::new(
             provider,
             &self.config,
             ctx.read().await.cwd.clone(),
         );
+
+        // Add publication tools if in publication mode
+        if let Some(ref store) = self.publication_store {
+            // Generate unique agent ID for this node instance
+            let agent_id = format!("{}-{}", node_id, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+            let handler = PublicationToolHandler::new(
+                store.clone(),
+                agent_id,
+                node_id.to_string(),
+            );
+            agent = agent.with_custom_handler(Arc::new(handler));
+        }
 
         // Create event channel for agent
         let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -542,7 +554,18 @@ impl FlowEngine {
                     .unwrap_or_else(|| sub_engine.config.llm.default_provider.clone());
 
                 let provider = provider::create_provider(&provider_name, &sub_engine.config)?;
-                let agent = Agent::new(provider, &sub_engine.config, cwd);
+                let mut agent = Agent::new(provider, &sub_engine.config, cwd);
+
+                // Add publication tools if in publication mode
+                if let Some(ref store) = sub_engine.publication_store {
+                    let agent_id = format!("{}-{}", node_id_clone, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+                    let handler = PublicationToolHandler::new(
+                        store.clone(),
+                        agent_id,
+                        node_id_clone.clone(),
+                    );
+                    agent = agent.with_custom_handler(Arc::new(handler));
+                }
 
                 let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
 

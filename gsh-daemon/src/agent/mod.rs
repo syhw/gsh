@@ -7,11 +7,32 @@ use crate::provider::{
     UsageStats,
 };
 use anyhow::Result;
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
 use tools::{ToolExecutor, ToolResult as ExecResult};
+
+/// Result from a custom tool execution
+#[derive(Debug, Clone)]
+pub struct CustomToolResult {
+    pub output: String,
+    pub success: bool,
+}
+
+/// Trait for custom tool handlers (e.g., publication tools)
+#[async_trait]
+pub trait CustomToolHandler: Send + Sync {
+    /// Check if this handler handles the given tool name
+    fn handles(&self, tool_name: &str) -> bool;
+
+    /// Execute a tool and return the result
+    async fn execute(&self, tool_name: &str, input: &serde_json::Value) -> CustomToolResult;
+
+    /// Get tool definitions for tools this handler provides
+    fn tool_definitions(&self) -> Vec<ToolDefinition>;
+}
 
 /// Events emitted by the agent during execution
 #[derive(Debug, Clone)]
@@ -41,6 +62,8 @@ pub struct Agent {
     session_id: String,
     /// Agent ID within the session
     agent_id: String,
+    /// Custom tool handlers (e.g., publication tools for flow coordination)
+    custom_handlers: Vec<Arc<dyn CustomToolHandler>>,
 }
 
 impl Agent {
@@ -76,7 +99,14 @@ Guidelines:
             observer: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             agent_id: "root".to_string(),
+            custom_handlers: Vec::new(),
         }
+    }
+
+    /// Add a custom tool handler
+    pub fn with_custom_handler(mut self, handler: Arc<dyn CustomToolHandler>) -> Self {
+        self.custom_handlers.push(handler);
+        self
     }
 
     /// Set the observer for logging and metrics
@@ -116,9 +146,24 @@ Guidelines:
         }
     }
 
-    /// Get tool definitions for the LLM
+    /// Get tool definitions for the LLM (including custom tools)
     pub fn tool_definitions(&self) -> Vec<ToolDefinition> {
-        self.tool_executor.definitions()
+        let mut tools = self.tool_executor.definitions();
+        // Add custom tool definitions
+        for handler in &self.custom_handlers {
+            tools.extend(handler.tool_definitions());
+        }
+        tools
+    }
+
+    /// Try to execute a tool using custom handlers
+    async fn try_custom_execute(&self, name: &str, input: &serde_json::Value) -> Option<CustomToolResult> {
+        for handler in &self.custom_handlers {
+            if handler.handles(name) {
+                return Some(handler.execute(name, input).await);
+            }
+        }
+        None
     }
 
     /// Run the agent with a single query (one-shot)
@@ -284,27 +329,37 @@ Guidelines:
                 }).await;
 
                 let start_time = Instant::now();
-                let result = self.tool_executor.execute(&name, &input).await;
-                let duration_ms = start_time.elapsed().as_millis() as u64;
 
-                let (output, success) = match &result {
-                    Ok(exec_result) => (exec_result.as_string(), exec_result.is_success()),
-                    Err(e) => (format!("Error: {}", e), false),
-                };
-
-                // Log detailed bash execution if applicable
-                if let Ok(ExecResult::Bash(bash_result)) = &result {
-                    self.log_event(EventKind::BashExec {
-                        command: bash_result.command.clone(),
-                        stdout: bash_result.stdout.clone(),
-                        stderr: bash_result.stderr.clone(),
-                        exit_code: bash_result.exit_code,
-                        duration_ms: Some(bash_result.duration_ms),
-                    });
+                // Try custom handlers first, then fall back to built-in executor
+                let (output, success) = if let Some(custom_result) = self.try_custom_execute(&name, &input).await {
+                    let duration_ms = start_time.elapsed().as_millis() as u64;
+                    self.log_event(EventKind::tool_result(&name, &custom_result.output, custom_result.success, Some(duration_ms)));
+                    (custom_result.output, custom_result.success)
                 } else {
-                    // Log generic tool result for non-bash tools
-                    self.log_event(EventKind::tool_result(&name, &output, success, Some(duration_ms)));
-                }
+                    let result = self.tool_executor.execute(&name, &input).await;
+                    let duration_ms = start_time.elapsed().as_millis() as u64;
+
+                    let (output, success) = match &result {
+                        Ok(exec_result) => (exec_result.as_string(), exec_result.is_success()),
+                        Err(e) => (format!("Error: {}", e), false),
+                    };
+
+                    // Log detailed bash execution if applicable
+                    if let Ok(ExecResult::Bash(bash_result)) = &result {
+                        self.log_event(EventKind::BashExec {
+                            command: bash_result.command.clone(),
+                            stdout: bash_result.stdout.clone(),
+                            stderr: bash_result.stderr.clone(),
+                            exit_code: bash_result.exit_code,
+                            duration_ms: Some(bash_result.duration_ms),
+                        });
+                    } else {
+                        // Log generic tool result for non-bash tools
+                        self.log_event(EventKind::tool_result(&name, &output, success, Some(duration_ms)));
+                    }
+
+                    (output, success)
+                };
 
                 let _ = event_tx.send(AgentEvent::ToolResult {
                     name: name.clone(),
