@@ -1,9 +1,11 @@
 use crate::config::Config;
 use crate::context::ContextAccumulator;
+use crate::observability::Observer;
 use crate::session::Session;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 /// Shared daemon state
 pub struct DaemonState {
@@ -15,16 +17,29 @@ pub struct DaemonState {
     pub sessions: RwLock<HashMap<String, Session>>,
     /// Daemon start time
     pub started_at: std::time::Instant,
+    /// Observer for logging and metrics
+    pub observer: Arc<Observer>,
 }
 
 impl DaemonState {
     pub fn new(config: Config) -> Arc<Self> {
         let max_events = config.context.max_events;
+
+        // Create observer for logging
+        let observer = match Observer::new() {
+            Ok(obs) => Arc::new(obs),
+            Err(e) => {
+                warn!("Failed to create observer, using default: {}", e);
+                Arc::new(Observer::default())
+            }
+        };
+
         Arc::new(Self {
             config,
             context: RwLock::new(ContextAccumulator::new(max_events)),
             sessions: RwLock::new(HashMap::new()),
             started_at: std::time::Instant::now(),
+            observer,
         })
     }
 

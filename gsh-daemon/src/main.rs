@@ -246,8 +246,11 @@ async fn process_message(
                 provider::create_provider(provider_name, &state.config)?
             };
 
-            // Create agent
-            let agent = agent::Agent::new(provider, &state.config, cwd.clone());
+            // Create agent with observer
+            let session_id_for_agent = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let agent = agent::Agent::new(provider, &state.config, cwd.clone())
+                .with_observer(state.observer.clone())
+                .with_session_id(&session_id_for_agent);
 
             // Create event channel
             let (event_tx, mut event_rx) = mpsc::channel::<agent::AgentEvent>(100);
@@ -373,12 +376,14 @@ async fn process_message(
                 ctx.generate_context(state.config.context.max_context_chars)
             };
 
-            // Create provider and agent
+            // Create provider and agent with observer
             let provider = provider::create_provider(
                 &state.config.llm.default_provider,
                 &state.config,
             )?;
-            let agent = agent::Agent::new(provider, &state.config, cwd);
+            let agent = agent::Agent::new(provider, &state.config, cwd)
+                .with_observer(state.observer.clone())
+                .with_session_id(&session_id);
 
             let (event_tx, mut event_rx) = mpsc::channel::<agent::AgentEvent>(100);
 
