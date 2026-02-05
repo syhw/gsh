@@ -1,10 +1,66 @@
 use crate::config::Config;
 use crate::provider::ToolDefinition;
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command;
+
+/// Detailed result from bash command execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BashResult {
+    pub command: String,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub duration_ms: u64,
+}
+
+impl BashResult {
+    /// Format as a combined string (for LLM consumption)
+    pub fn to_output_string(&self) -> String {
+        let mut result = String::new();
+        if !self.stdout.is_empty() {
+            result.push_str(&self.stdout);
+        }
+        if !self.stderr.is_empty() {
+            if !result.is_empty() {
+                result.push_str("\n--- stderr ---\n");
+            }
+            result.push_str(&self.stderr);
+        }
+        result.push_str(&format!("\n[exit code: {}]", self.exit_code));
+        result
+    }
+}
+
+/// Result from tool execution - can be simple string or structured
+#[derive(Debug, Clone)]
+pub enum ToolResult {
+    /// Simple text output
+    Text(String),
+    /// Structured bash result with separate stdout/stderr
+    Bash(BashResult),
+}
+
+impl ToolResult {
+    /// Get the output as a string (for LLM)
+    pub fn as_string(&self) -> String {
+        match self {
+            ToolResult::Text(s) => s.clone(),
+            ToolResult::Bash(b) => b.to_output_string(),
+        }
+    }
+
+    /// Check if the result indicates success
+    pub fn is_success(&self) -> bool {
+        match self {
+            ToolResult::Text(_) => true,
+            ToolResult::Bash(b) => b.exit_code == 0,
+        }
+    }
+}
 
 /// Executes tools based on LLM requests
 pub struct ToolExecutor {
@@ -170,14 +226,14 @@ impl ToolExecutor {
     }
 
     /// Execute a tool by name
-    pub async fn execute(&self, name: &str, input: &serde_json::Value) -> Result<String> {
+    pub async fn execute(&self, name: &str, input: &serde_json::Value) -> Result<ToolResult> {
         match name {
             "bash" => self.exec_bash(input).await,
-            "read" => self.exec_read(input).await,
-            "write" => self.exec_write(input).await,
-            "edit" => self.exec_edit(input).await,
-            "glob" => self.exec_glob(input).await,
-            "grep" => self.exec_grep(input).await,
+            "read" => self.exec_read(input).await.map(ToolResult::Text),
+            "write" => self.exec_write(input).await.map(ToolResult::Text),
+            "edit" => self.exec_edit(input).await.map(ToolResult::Text),
+            "glob" => self.exec_glob(input).await.map(ToolResult::Text),
+            "grep" => self.exec_grep(input).await.map(ToolResult::Text),
             _ => anyhow::bail!("Unknown tool: {}", name),
         }
     }
@@ -198,12 +254,14 @@ impl ToolExecutor {
         })
     }
 
-    async fn exec_bash(&self, input: &serde_json::Value) -> Result<String> {
+    async fn exec_bash(&self, input: &serde_json::Value) -> Result<ToolResult> {
         let command = input["command"]
             .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
 
         let timeout_secs = input["timeout_secs"].as_u64().unwrap_or(30);
+
+        let start = std::time::Instant::now();
 
         let output = Command::new("bash")
             .arg("-c")
@@ -211,7 +269,7 @@ impl ToolExecutor {
             .current_dir(&self.cwd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true) // Kill process if future is dropped (e.g., on timeout)
+            .kill_on_drop(true)
             .output();
 
         let timeout = tokio::time::timeout(
@@ -220,31 +278,24 @@ impl ToolExecutor {
         )
         .await;
 
+        let duration_ms = start.elapsed().as_millis() as u64;
+
         match timeout {
             Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
                 let exit_code = output.status.code().unwrap_or(-1);
 
-                let mut result = String::new();
-                if !stdout.is_empty() {
-                    result.push_str(&stdout);
-                }
-                if !stderr.is_empty() {
-                    if !result.is_empty() {
-                        result.push_str("\n--- stderr ---\n");
-                    }
-                    result.push_str(&stderr);
-                }
-                result.push_str(&format!("\n[exit code: {}]", exit_code));
-
-                Ok(result)
+                Ok(ToolResult::Bash(BashResult {
+                    command: command.to_string(),
+                    stdout,
+                    stderr,
+                    exit_code,
+                    duration_ms,
+                }))
             }
             Ok(Err(e)) => Err(anyhow::anyhow!("Command execution failed: {}", e)),
-            Err(_) => {
-                // The process will be killed automatically due to kill_on_drop(true)
-                Err(anyhow::anyhow!("Command timed out after {} seconds", timeout_secs))
-            }
+            Err(_) => Err(anyhow::anyhow!("Command timed out after {} seconds", timeout_secs)),
         }
     }
 

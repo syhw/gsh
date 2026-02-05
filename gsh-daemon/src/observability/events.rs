@@ -76,6 +76,16 @@ pub enum EventKind {
         duration_ms: Option<u64>,
     },
 
+    /// Bash command executed with detailed I/O capture
+    BashExec {
+        command: String,
+        stdout: String,
+        stderr: String,
+        exit_code: i32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+    },
+
     /// Agent completed its work
     Complete {
         #[serde(skip_serializing_if = "Option::is_none")]

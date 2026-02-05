@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::mpsc;
-use tools::ToolExecutor;
+use tools::{ToolExecutor, ToolResult as ExecResult};
 
 /// Events emitted by the agent during execution
 #[derive(Debug, Clone)]
@@ -287,13 +287,24 @@ Guidelines:
                 let result = self.tool_executor.execute(&name, &input).await;
                 let duration_ms = start_time.elapsed().as_millis() as u64;
 
-                let (output, success) = match result {
-                    Ok(output) => (output, true),
+                let (output, success) = match &result {
+                    Ok(exec_result) => (exec_result.as_string(), exec_result.is_success()),
                     Err(e) => (format!("Error: {}", e), false),
                 };
 
-                // Log tool result
-                self.log_event(EventKind::tool_result(&name, &output, success, Some(duration_ms)));
+                // Log detailed bash execution if applicable
+                if let Ok(ExecResult::Bash(bash_result)) = &result {
+                    self.log_event(EventKind::BashExec {
+                        command: bash_result.command.clone(),
+                        stdout: bash_result.stdout.clone(),
+                        stderr: bash_result.stderr.clone(),
+                        exit_code: bash_result.exit_code,
+                        duration_ms: Some(bash_result.duration_ms),
+                    });
+                } else {
+                    // Log generic tool result for non-bash tools
+                    self.log_event(EventKind::tool_result(&name, &output, success, Some(duration_ms)));
+                }
 
                 let _ = event_tx.send(AgentEvent::ToolResult {
                     name: name.clone(),

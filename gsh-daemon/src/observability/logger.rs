@@ -100,6 +100,7 @@ impl EventLogger {
                 EventKind::FlowStart { .. } => "flow_start",
                 EventKind::FlowComplete { .. } => "flow_complete",
                 EventKind::Iteration { .. } => "iteration",
+                EventKind::BashExec { .. } => "bash_exec",
             };
 
             if !self.config.event_filter.iter().any(|f| f == event_type) {

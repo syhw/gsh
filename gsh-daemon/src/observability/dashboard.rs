@@ -557,6 +557,33 @@ fn format_event(event: &ObservabilityEvent) -> (&'static str, Color, String) {
             Color::DarkGray,
             format!("Iteration {}/{}", iteration + 1, max_iterations),
         ),
+        EventKind::BashExec {
+            command,
+            exit_code,
+            duration_ms,
+            stdout,
+            stderr,
+        } => {
+            let status = if *exit_code == 0 { "OK" } else { "FAIL" };
+            let duration = duration_ms
+                .map(|d| format!(" ({}ms)", d))
+                .unwrap_or_default();
+            let has_stderr = if !stderr.is_empty() { " +stderr" } else { "" };
+            let out_len = stdout.len();
+            let cmd_truncated = if command.len() > 30 {
+                format!("{}...", &command[..27])
+            } else {
+                command.clone()
+            };
+            (
+                "B",
+                if *exit_code == 0 { Color::Green } else { Color::Red },
+                format!(
+                    "bash: {} [{}{}] {}b out{}",
+                    cmd_truncated, status, duration, out_len, has_stderr
+                ),
+            )
+        }
     }
 }
 
