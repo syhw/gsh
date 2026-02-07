@@ -224,7 +224,7 @@ async fn process_message(
             Ok(Some(DaemonMessage::Ack))
         }
 
-        ShellMessage::Prompt { query, cwd, session_id, stream, provider: provider_override, model: model_override, flow: flow_name } => {
+        ShellMessage::Prompt { query, cwd, session_id, stream, provider: provider_override, model: model_override, flow: flow_name, env_info } => {
             // Check if this is a flow execution
             if let Some(flow_name) = flow_name {
                 return run_flow(
@@ -252,19 +252,44 @@ async fn process_message(
                 provider::create_provider(provider_name, &state.config)?
             };
 
+            // Create or load session for persistence
+            let session_dir = state.session_dir.clone();
+            let mut prompt_session = if let Some(ref id) = session_id {
+                session::Session::load(id, session_dir.clone()).unwrap_or_else(|_| {
+                    session::Session::create(cwd.clone(), session_dir).unwrap()
+                })
+            } else {
+                session::Session::create(cwd.clone(), session_dir)?
+            };
+            let session_id_for_agent = prompt_session.id().to_string();
+
+            // Persist user message
+            prompt_session.add_message(provider::ChatMessage {
+                role: provider::ChatRole::User,
+                content: provider::MessageContent::Text(query.clone()),
+            })?;
+
+            let messages = prompt_session.messages.clone();
+
             // Create agent with observer
-            let session_id_for_agent = session_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-            let agent = agent::Agent::new(provider, &state.config, cwd.clone())
+            let agent = agent::Agent::new_with_env(provider, &state.config, cwd.clone(), env_info)
                 .with_observer(state.observer.clone())
                 .with_session_id(&session_id_for_agent);
 
             // Create event channel
             let (event_tx, mut event_rx) = mpsc::channel::<agent::AgentEvent>(100);
 
-            // Spawn agent task
-            let agent_handle = tokio::spawn(async move {
-                agent.run_oneshot(&query, Some(&context), event_tx).await
-            });
+            // Spawn agent task with history for resumed sessions
+            let has_history = messages.len() > 1;
+            let agent_handle = if has_history {
+                tokio::spawn(async move {
+                    agent.run_with_history(messages, event_tx).await
+                })
+            } else {
+                tokio::spawn(async move {
+                    agent.run_oneshot(&query, Some(&context), event_tx).await
+                })
+            };
 
             // Stream events to client
             let mut final_text = String::new();
@@ -308,12 +333,20 @@ async fn process_message(
             // Wait for agent to finish
             let _ = agent_handle.await?;
 
+            // Persist assistant response
+            if !final_text.is_empty() {
+                prompt_session.add_message(provider::ChatMessage {
+                    role: provider::ChatRole::Assistant,
+                    content: provider::MessageContent::Text(final_text.clone()),
+                })?;
+            }
+            prompt_session.close();
+
             // If not streaming and no error, send final response
             if !stream && !had_error {
-                let session_id = session_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
                 return Ok(Some(DaemonMessage::Response {
                     text: final_text,
-                    session_id,
+                    session_id: session_id_for_agent,
                 }));
             }
 
@@ -340,7 +373,7 @@ async fn process_message(
             Ok(Some(DaemonMessage::AgentKilled { agent_id }))
         }
 
-        ShellMessage::ChatStart { cwd, session_id } => {
+        ShellMessage::ChatStart { cwd, session_id, env_info } => {
             let session_dir = state.session_dir.clone();
             let session = if let Some(ref id) = session_id {
                 // Try to resume existing session from disk
@@ -362,6 +395,12 @@ async fn process_message(
 
             let mut sessions = state.sessions.write().await;
             sessions.insert(session_id.clone(), session);
+
+            // Store client env info for this session
+            if let Some(env) = env_info {
+                let mut envs = state.session_env.write().await;
+                envs.insert(session_id.clone(), env);
+            }
 
             // Include message count so CLI can show "(resumed, N messages)"
             if message_count > 0 {
@@ -395,7 +434,11 @@ async fn process_message(
                 &state.config.llm.default_provider,
                 &state.config,
             )?;
-            let agent = agent::Agent::new(provider, &state.config, cwd)
+            let env_info = {
+                let envs = state.session_env.read().await;
+                envs.get(&session_id).cloned()
+            };
+            let agent = agent::Agent::new_with_env(provider, &state.config, cwd, env_info)
                 .with_observer(state.observer.clone())
                 .with_session_id(&session_id);
 
@@ -456,6 +499,9 @@ async fn process_message(
             if let Some(mut session) = sessions.remove(&session_id) {
                 session.close(); // Flush to disk, keep file for future resume
             }
+            // Clean up env info
+            let mut envs = state.session_env.write().await;
+            envs.remove(&session_id);
             Ok(Some(DaemonMessage::Ack))
         }
 

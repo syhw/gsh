@@ -2,6 +2,7 @@ pub mod tools;
 
 use crate::config::Config;
 use crate::observability::{EventKind, Observer};
+use crate::protocol::EnvInfo;
 use crate::provider::{
     ChatMessage, ChatRole, ContentBlock, MessageContent, Provider, StreamEvent, ToolDefinition,
     UsageStats,
@@ -68,10 +69,19 @@ pub struct Agent {
 
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, config: &Config, cwd: String) -> Self {
+        Self::new_with_env(provider, config, cwd, None)
+    }
+
+    pub fn new_with_env(provider: Box<dyn Provider>, config: &Config, cwd: String, env_info: Option<EnvInfo>) -> Self {
+        let python_env = detect_python_env(&cwd, env_info.as_ref());
+
         let default_system = format!(
             r#"You are an AI assistant integrated into a shell environment. You help users with coding, system administration, and general tasks.
 
 Current working directory: {}
+Platform: {}
+
+{}
 
 You have access to tools for interacting with the file system and running commands. Use them when helpful to accomplish the user's request.
 
@@ -80,8 +90,11 @@ Guidelines:
 - When asked to perform actions, use the available tools
 - For file operations, prefer using absolute paths
 - Explain what you're doing when running commands or modifying files
-- If a command fails, analyze the error and suggest solutions"#,
-            cwd
+- If a command fails, analyze the error and suggest solutions
+- On macOS, use `python3` not `python`, and `pip3` not `pip`"#,
+            cwd,
+            std::env::consts::OS,
+            python_env,
         );
 
         let system_prompt = config
@@ -398,5 +411,122 @@ Guidelines:
         }
 
         Ok(final_text)
+    }
+}
+
+/// Detect available Python environments and return system prompt section
+fn detect_python_env(cwd: &str, env_info: Option<&EnvInfo>) -> String {
+    let home = dirs::home_dir().unwrap_or_default();
+    let cwd_path = std::path::Path::new(cwd);
+    let gsh_venv = home.join(".local").join("share").join("gsh").join("python-env");
+
+    // Check for active env from client's shell (highest priority)
+    if let Some(info) = env_info {
+        // Active conda/micromamba env
+        if let (Some(env_name), Some(prefix)) = (&info.conda_env, &info.conda_prefix) {
+            tracing::info!("Python env: conda/micromamba '{}' at {}", env_name, prefix);
+            tracing::info!("  activate: micromamba activate {} (or conda activate {})", env_name, env_name);
+            return format!(
+                r#"Python environment: conda/micromamba environment '{}' is active.
+Path: {}
+IMPORTANT: When running Python commands, first activate with: eval "$(micromamba shell hook -s bash)" && micromamba activate {}
+Or prefix commands with the full path: {}/bin/python3"#,
+                env_name, prefix, env_name, prefix
+            );
+        }
+        // Active venv
+        if let Some(venv) = &info.virtual_env {
+            tracing::info!("Python env: venv at {}", venv);
+            tracing::info!("  activate: source {}/bin/activate", venv);
+            return format!(
+                r#"Python environment: venv is active.
+Path: {}
+IMPORTANT: When running Python commands, first activate with: source {}/bin/activate
+Or prefix commands with the full path: {}/bin/python3"#,
+                venv, venv, venv
+            );
+        }
+    }
+
+    let mut found = Vec::new();
+
+    // Check for gsh-managed venv
+    let gsh_venv_active = gsh_venv.join("bin").join("python3").exists();
+    if gsh_venv_active {
+        found.push(format!(
+            "- gsh managed venv: {} (activate with `source {}/bin/activate`)",
+            gsh_venv.display(),
+            gsh_venv.display()
+        ));
+    }
+
+    // Check for local venv/.venv in cwd
+    for name in &[".venv", "venv"] {
+        let venv = cwd_path.join(name);
+        if venv.join("bin").join("python3").exists() {
+            found.push(format!(
+                "- Project venv: {}/{}  (activate with `source {}/{}/bin/activate`)",
+                cwd, name, cwd, name
+            ));
+        }
+    }
+
+    // Check for conda/micromamba
+    let conda_paths = [
+        (home.join("miniconda3"), "conda (miniconda3)"),
+        (home.join("anaconda3"), "conda (anaconda3)"),
+        (home.join("miniforge3"), "conda (miniforge3)"),
+        (home.join("mambaforge"), "mamba (mambaforge)"),
+        (home.join("micromamba"), "micromamba"),
+        (home.join(".local/share/micromamba"), "micromamba"),
+    ];
+    for (path, label) in &conda_paths {
+        if path.exists() {
+            found.push(format!("- {}: {}", label, path.display()));
+        }
+    }
+
+    // Check for pyenv
+    let pyenv = home.join(".pyenv");
+    if pyenv.exists() {
+        found.push(format!("- pyenv: {}", pyenv.display()));
+    }
+
+    if found.is_empty() {
+        let venv_path = gsh_venv.display().to_string();
+        tracing::info!("Python env: none detected. Will use: {}", venv_path);
+        format!(
+            r#"Python environment: None detected.
+When Python is needed, create a venv at {} using:
+  python3 -m venv {}
+  source {}/bin/activate"#,
+            venv_path, venv_path, venv_path,
+        )
+    } else {
+        let preferred = if gsh_venv_active {
+            let venv_path = gsh_venv.display().to_string();
+            tracing::info!("Python env: gsh venv at {}", venv_path);
+            tracing::info!("  activate: source {}/bin/activate", venv_path);
+            format!(
+                "\nPreferred: use the gsh venv (`source {}/bin/activate`) before running Python commands.",
+                venv_path
+            )
+        } else if found.iter().any(|f| f.contains("Project venv")) {
+            tracing::info!("Python env: project venv in {}", cwd);
+            tracing::info!("  activate: source {}/.venv/bin/activate", cwd);
+            "\nPreferred: use the project venv found in the current directory.".to_string()
+        } else {
+            if let Some(first) = found.first() {
+                tracing::info!("Python env: {}", first.trim_start_matches("- "));
+            }
+            let venv_path = gsh_venv.display().to_string();
+            tracing::info!("  For pip installs, create: python3 -m venv {}", venv_path);
+            format!(
+                "\nWhen installing packages, create/use a venv at {} to avoid polluting the system Python.",
+                venv_path
+            )
+        };
+
+        format!("Python environments found:\n{}{}", found.join("\n"), preferred)
     }
 }

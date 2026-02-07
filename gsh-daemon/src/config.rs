@@ -419,10 +419,15 @@ impl Config {
     }
 
     /// Get the session storage directory
+    /// Prefers ~/.local/share/gsh/sessions (XDG style) for CLI tools
     pub fn session_dir(&self) -> PathBuf {
-        dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("gsh")
-            .join("sessions")
+        if let Some(home) = dirs::home_dir() {
+            home.join(".local").join("share").join("gsh").join("sessions")
+        } else {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("gsh")
+                .join("sessions")
+        }
     }
 }

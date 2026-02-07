@@ -39,6 +39,9 @@ pub enum ShellMessage {
         /// Optional flow to execute
         #[serde(default)]
         flow: Option<String>,
+        /// Client-side environment info (active Python env, etc.)
+        #[serde(default)]
+        env_info: Option<EnvInfo>,
     },
     /// List available subagents
     ListAgents,
@@ -50,6 +53,9 @@ pub enum ShellMessage {
     ChatStart {
         cwd: String,
         session_id: Option<String>,
+        /// Client-side environment info
+        #[serde(default)]
+        env_info: Option<EnvInfo>,
     },
     /// Message in ongoing chat
     ChatMessage {
@@ -154,6 +160,19 @@ pub struct SessionInfo {
     pub last_activity: DateTime<Utc>,
     pub message_count: usize,
     pub cwd: String,
+}
+
+/// Environment info from the client's shell
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EnvInfo {
+    /// Active conda/micromamba env name (from CONDA_DEFAULT_ENV)
+    pub conda_env: Option<String>,
+    /// Active conda/micromamba env path (from CONDA_PREFIX)
+    pub conda_prefix: Option<String>,
+    /// Active Python venv path (from VIRTUAL_ENV)
+    pub virtual_env: Option<String>,
+    /// PATH from the client's shell
+    pub path: Option<String>,
 }
 
 /// Information about a running agent

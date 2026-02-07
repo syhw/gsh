@@ -102,10 +102,14 @@ enum ShellMessage {
         model: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         flow: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        env_info: Option<EnvInfo>,
     },
     ChatStart {
         cwd: String,
         session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        env_info: Option<EnvInfo>,
     },
     ChatMessage {
         session_id: String,
@@ -148,6 +152,36 @@ enum DaemonMessage {
     SessionList { sessions: Vec<SessionInfo> },
     SessionDeleted { session_id: String },
     ShuttingDown,
+}
+
+#[derive(Debug, Serialize)]
+struct EnvInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conda_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conda_prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    virtual_env: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+}
+
+fn detect_env_info() -> Option<EnvInfo> {
+    let conda_env = std::env::var("CONDA_DEFAULT_ENV").ok();
+    let conda_prefix = std::env::var("CONDA_PREFIX").ok();
+    let virtual_env = std::env::var("VIRTUAL_ENV").ok();
+    let path = std::env::var("PATH").ok();
+
+    if conda_env.is_some() || conda_prefix.is_some() || virtual_env.is_some() {
+        Some(EnvInfo {
+            conda_env,
+            conda_prefix,
+            virtual_env,
+            path,
+        })
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -317,6 +351,7 @@ async fn run_prompt(
         provider,
         model,
         flow,
+        env_info: detect_env_info(),
     };
 
     let msg_str = serde_json::to_string(&msg)? + "\n";
@@ -380,6 +415,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
     let msg = ShellMessage::ChatStart {
         cwd: get_cwd(),
         session_id: session_id.clone(),
+        env_info: detect_env_info(),
     };
     let msg_str = serde_json::to_string(&msg)? + "\n";
     writer.write_all(msg_str.as_bytes()).await?;

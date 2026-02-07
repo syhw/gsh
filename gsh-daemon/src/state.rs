@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::context::ContextAccumulator;
 use crate::observability::Observer;
+use crate::protocol::EnvInfo;
 use crate::session::Session;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,6 +17,8 @@ pub struct DaemonState {
     pub context: RwLock<ContextAccumulator>,
     /// Active chat sessions
     pub sessions: RwLock<HashMap<String, Session>>,
+    /// Client environment info per session (for Python env, PATH, etc.)
+    pub session_env: RwLock<HashMap<String, EnvInfo>>,
     /// Daemon start time
     pub started_at: std::time::Instant,
     /// Observer for logging and metrics
@@ -47,6 +50,7 @@ impl DaemonState {
             config,
             context: RwLock::new(ContextAccumulator::new(max_events)),
             sessions: RwLock::new(HashMap::new()),
+            session_env: RwLock::new(HashMap::new()),
             started_at: std::time::Instant::now(),
             observer,
             session_dir,
