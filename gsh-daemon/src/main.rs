@@ -341,17 +341,35 @@ async fn process_message(
         }
 
         ShellMessage::ChatStart { cwd, session_id } => {
-            let session = if let Some(id) = session_id {
-                session::Session::with_id(id, cwd)
+            let session_dir = state.session_dir.clone();
+            let session = if let Some(ref id) = session_id {
+                // Try to resume existing session from disk
+                match session::Session::load(id, session_dir.clone()) {
+                    Ok(s) => {
+                        info!("Resumed session {} ({} messages)", id, s.messages.len());
+                        s
+                    }
+                    Err(e) => {
+                        warn!("Failed to resume session {}: {}, creating new", id, e);
+                        session::Session::create(cwd, session_dir)?
+                    }
+                }
             } else {
-                session::Session::new(cwd)
+                session::Session::create(cwd, session_dir)?
             };
-            let session_id = session.id.clone();
+            let session_id = session.id().to_string();
+            let message_count = session.messages.len();
 
             let mut sessions = state.sessions.write().await;
             sessions.insert(session_id.clone(), session);
 
-            Ok(Some(DaemonMessage::ChatStarted { session_id }))
+            // Include message count so CLI can show "(resumed, N messages)"
+            if message_count > 0 {
+                info!("Chat session resumed: {} ({} messages)", &session_id[..8], message_count);
+            }
+
+            let resumed = message_count > 0;
+            Ok(Some(DaemonMessage::ChatStarted { session_id, resumed, message_count }))
         }
 
         ShellMessage::ChatMessage { session_id, message } => {
@@ -359,28 +377,18 @@ async fn process_message(
             let session = sessions.get_mut(&session_id)
                 .ok_or_else(|| anyhow::anyhow!("Session not found: {}", session_id))?;
 
-            session.add_user_message(message.clone());
-            let cwd = session.cwd.clone();
+            // Create and persist user message using provider types
+            let user_msg = provider::ChatMessage {
+                role: provider::ChatRole::User,
+                content: provider::MessageContent::Text(message.clone()),
+            };
+            session.add_message(user_msg)?;
+            let cwd = session.metadata.cwd.clone();
 
-            // Build messages from session history
-            let messages: Vec<provider::ChatMessage> = session.messages.iter().map(|m| {
-                provider::ChatMessage {
-                    role: match m.role {
-                        session::MessageRole::User => provider::ChatRole::User,
-                        session::MessageRole::Assistant => provider::ChatRole::Assistant,
-                        session::MessageRole::System => provider::ChatRole::User, // System messages go as user
-                    },
-                    content: provider::MessageContent::Text(m.content.clone()),
-                }
-            }).collect();
+            // Messages are already Vec<ChatMessage> — no conversion needed
+            let messages = session.messages.clone();
 
             drop(sessions); // Release lock before async work
-
-            // Get shell context (TODO: incorporate into system prompt for chat sessions)
-            let _context = {
-                let ctx = state.context.read().await;
-                ctx.generate_context(state.config.context.max_context_chars)
-            };
 
             // Create provider and agent with observer
             let provider = provider::create_provider(
@@ -428,10 +436,16 @@ async fn process_message(
 
             let _ = agent_handle.await?;
 
-            // Update session with assistant response
+            // Persist assistant response
             let mut sessions = state.sessions.write().await;
             if let Some(session) = sessions.get_mut(&session_id) {
-                session.add_assistant_message(final_text);
+                let assistant_msg = provider::ChatMessage {
+                    role: provider::ChatRole::Assistant,
+                    content: provider::MessageContent::Text(final_text),
+                };
+                if let Err(e) = session.add_message(assistant_msg) {
+                    warn!("Failed to persist assistant message: {}", e);
+                }
             }
 
             Ok(None)
@@ -439,8 +453,41 @@ async fn process_message(
 
         ShellMessage::ChatEnd { session_id } => {
             let mut sessions = state.sessions.write().await;
-            sessions.remove(&session_id);
+            if let Some(mut session) = sessions.remove(&session_id) {
+                session.close(); // Flush to disk, keep file for future resume
+            }
             Ok(Some(DaemonMessage::Ack))
+        }
+
+        ShellMessage::ListSessions { limit } => {
+            let metas = session::list_sessions(&state.session_dir)
+                .unwrap_or_default();
+            let limit = limit.unwrap_or(20);
+            let sessions: Vec<protocol::SessionInfo> = metas.into_iter()
+                .take(limit)
+                .map(|m| protocol::SessionInfo {
+                    id: m.id,
+                    title: m.title,
+                    created_at: m.created_at,
+                    last_activity: m.last_activity,
+                    message_count: m.message_count,
+                    cwd: m.cwd,
+                })
+                .collect();
+            Ok(Some(DaemonMessage::SessionList { sessions }))
+        }
+
+        ShellMessage::DeleteSession { session_id } => {
+            // Remove from active sessions if loaded
+            let mut sessions = state.sessions.write().await;
+            if let Some(mut session) = sessions.remove(&session_id) {
+                session.close();
+            }
+            drop(sessions);
+
+            // Delete from disk
+            session::delete_session(&session_id, &state.session_dir)?;
+            Ok(Some(DaemonMessage::SessionDeleted { session_id }))
         }
 
         ShellMessage::Ping => {

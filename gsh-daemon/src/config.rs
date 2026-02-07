@@ -12,6 +12,8 @@ pub struct Config {
     pub context: ContextConfig,
     #[serde(default)]
     pub tools: ToolsConfig,
+    #[serde(default)]
+    pub sessions: SessionsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -234,6 +236,33 @@ fn default_max_file_size() -> usize {
     1024 * 1024 // 1MB
 }
 
+fn default_max_sessions() -> usize {
+    100
+}
+
+fn default_max_session_age_days() -> u64 {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionsConfig {
+    /// Maximum number of sessions to keep on disk
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
+    /// Maximum age of inactive sessions in days
+    #[serde(default = "default_max_session_age_days")]
+    pub max_age_days: u64,
+}
+
+impl Default for SessionsConfig {
+    fn default() -> Self {
+        Self {
+            max_sessions: default_max_sessions(),
+            max_age_days: default_max_session_age_days(),
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -241,6 +270,7 @@ impl Default for Config {
             llm: LlmConfig::default(),
             context: ContextConfig::default(),
             tools: ToolsConfig::default(),
+            sessions: SessionsConfig::default(),
         }
     }
 }
@@ -386,5 +416,13 @@ impl Config {
             .api_key
             .clone()
             .or_else(|| std::env::var("TOGETHER_API_KEY").ok())
+    }
+
+    /// Get the session storage directory
+    pub fn session_dir(&self) -> PathBuf {
+        dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("gsh")
+            .join("sessions")
     }
 }

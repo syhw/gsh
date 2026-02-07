@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -71,6 +72,15 @@ enum Commands {
         /// Agent ID or session name
         agent: String,
     },
+    /// List or manage saved chat sessions
+    Sessions {
+        /// Delete a session by ID (prefix ok)
+        #[arg(long)]
+        delete: Option<String>,
+        /// Maximum number of sessions to show
+        #[arg(long, short = 'n', default_value = "20")]
+        limit: usize,
+    },
     /// Check daemon status
     Status,
     /// Stop the daemon
@@ -105,6 +115,13 @@ enum ShellMessage {
         session_id: String,
     },
     ListAgents,
+    ListSessions {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    DeleteSession {
+        session_id: String,
+    },
     Ping,
     Shutdown,
 }
@@ -120,8 +137,16 @@ enum DaemonMessage {
     ToolResult { tool: String, output: String, success: bool },
     Response { text: String, session_id: String },
     Error { message: String, code: Option<String> },
-    ChatStarted { session_id: String },
+    ChatStarted {
+        session_id: String,
+        #[serde(default)]
+        resumed: bool,
+        #[serde(default)]
+        message_count: usize,
+    },
     AgentList { agents: Vec<AgentInfo> },
+    SessionList { sessions: Vec<SessionInfo> },
+    SessionDeleted { session_id: String },
     ShuttingDown,
 }
 
@@ -132,6 +157,17 @@ struct AgentInfo {
     session_name: String,
     task: Option<String>,
     cwd: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct SessionInfo {
+    id: String,
+    title: Option<String>,
+    created_at: DateTime<Utc>,
+    last_activity: DateTime<Utc>,
+    message_count: usize,
+    cwd: String,
 }
 
 fn get_socket_path() -> PathBuf {
@@ -175,6 +211,13 @@ async fn main() -> Result<()> {
         Some(Commands::Kill { agent }) => {
             run_kill(&agent).await
         }
+        Some(Commands::Sessions { delete, limit }) => {
+            if let Some(session_id) = delete {
+                run_delete_session(&session_id).await
+            } else {
+                run_sessions(limit).await
+            }
+        }
         Some(Commands::Status) => {
             run_status().await
         }
@@ -199,6 +242,8 @@ async fn main() -> Result<()> {
             println!("       echo 'prompt' | gsh      Read prompt from stdin");
             println!("       gsh - < file.txt         Read prompt from file");
             println!("       gsh chat                 Start interactive chat");
+            println!("       gsh chat --session <id>  Resume a saved session");
+            println!("       gsh sessions             List saved sessions");
             println!("       gsh agents               List running subagents");
             println!("       gsh status               Check daemon status");
             println!("       gsh stop                 Stop the daemon");
@@ -344,8 +389,12 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
 
     let response: DaemonMessage = serde_json::from_str(line.trim())?;
     let session_id = match response {
-        DaemonMessage::ChatStarted { session_id } => {
-            println!("Chat session started ({})", &session_id[..8]);
+        DaemonMessage::ChatStarted { session_id, resumed, message_count } => {
+            if resumed {
+                println!("Chat session resumed ({}, {} messages)", &session_id[..8], message_count);
+            } else {
+                println!("Chat session started ({})", &session_id[..8]);
+            }
             session_id
         }
         DaemonMessage::Error { message, .. } => {
@@ -441,6 +490,103 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
 
     println!("Chat session ended.");
     Ok(())
+}
+
+async fn run_sessions(limit: usize) -> Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let msg = ShellMessage::ListSessions {
+        limit: Some(limit),
+    };
+    let msg_str = serde_json::to_string(&msg)? + "\n";
+    writer.write_all(msg_str.as_bytes()).await?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    let response: DaemonMessage = serde_json::from_str(line.trim())?;
+
+    match response {
+        DaemonMessage::SessionList { sessions } => {
+            if sessions.is_empty() {
+                println!("No saved sessions");
+            } else {
+                println!("Saved sessions ({}):", sessions.len());
+                println!();
+                for s in sessions {
+                    let title = s.title.as_deref().unwrap_or("(untitled)");
+                    let title_display: String = title.chars().take(50).collect();
+                    let age = format_age(s.last_activity);
+                    println!(
+                        "  {} | {:>3} msgs | {} | {}",
+                        &s.id[..8],
+                        s.message_count,
+                        age,
+                        title_display,
+                    );
+                }
+                println!();
+                println!("Resume with: gsh chat --session <id>");
+                println!("Delete with: gsh sessions --delete <id>");
+            }
+        }
+        DaemonMessage::Error { message, .. } => {
+            eprintln!("Error: {}", message);
+        }
+        _ => {
+            eprintln!("Unexpected response");
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_delete_session(session_id: &str) -> Result<()> {
+    let stream = connect().await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let msg = ShellMessage::DeleteSession {
+        session_id: session_id.to_string(),
+    };
+    let msg_str = serde_json::to_string(&msg)? + "\n";
+    writer.write_all(msg_str.as_bytes()).await?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+
+    let response: DaemonMessage = serde_json::from_str(line.trim())?;
+
+    match response {
+        DaemonMessage::SessionDeleted { session_id } => {
+            println!("Deleted session {}", &session_id[..8.min(session_id.len())]);
+        }
+        DaemonMessage::Error { message, .. } => {
+            eprintln!("Error: {}", message);
+        }
+        _ => {
+            eprintln!("Unexpected response");
+        }
+    }
+
+    Ok(())
+}
+
+fn format_age(time: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(time);
+
+    if duration.num_days() > 0 {
+        format!("{}d ago", duration.num_days())
+    } else if duration.num_hours() > 0 {
+        format!("{}h ago", duration.num_hours())
+    } else if duration.num_minutes() > 0 {
+        format!("{}m ago", duration.num_minutes())
+    } else {
+        "just now".to_string()
+    }
 }
 
 async fn run_agents() -> Result<()> {

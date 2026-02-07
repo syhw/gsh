@@ -3,6 +3,7 @@ use crate::context::ContextAccumulator;
 use crate::observability::Observer;
 use crate::session::Session;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
@@ -19,11 +20,19 @@ pub struct DaemonState {
     pub started_at: std::time::Instant,
     /// Observer for logging and metrics
     pub observer: Arc<Observer>,
+    /// Session storage directory
+    pub session_dir: PathBuf,
 }
 
 impl DaemonState {
     pub fn new(config: Config) -> Arc<Self> {
         let max_events = config.context.max_events;
+        let session_dir = config.session_dir();
+
+        // Ensure session directory exists
+        if let Err(e) = std::fs::create_dir_all(&session_dir) {
+            warn!("Failed to create session directory {:?}: {}", session_dir, e);
+        }
 
         // Create observer for logging
         let observer = match Observer::new() {
@@ -40,6 +49,7 @@ impl DaemonState {
             sessions: RwLock::new(HashMap::new()),
             started_at: std::time::Instant::now(),
             observer,
+            session_dir,
         })
     }
 

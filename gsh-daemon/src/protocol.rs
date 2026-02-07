@@ -60,6 +60,15 @@ pub enum ShellMessage {
     ChatEnd {
         session_id: String,
     },
+    /// List saved chat sessions
+    ListSessions {
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// Delete a saved session
+    DeleteSession {
+        session_id: String,
+    },
     /// Ping to check daemon health
     Ping,
     /// Request daemon shutdown
@@ -106,6 +115,10 @@ pub enum DaemonMessage {
     /// Chat session started
     ChatStarted {
         session_id: String,
+        #[serde(default)]
+        resumed: bool,
+        #[serde(default)]
+        message_count: usize,
     },
     /// List of running agents
     AgentList {
@@ -120,8 +133,27 @@ pub enum DaemonMessage {
         event: String,
         data: serde_json::Value,
     },
+    /// List of saved sessions
+    SessionList {
+        sessions: Vec<SessionInfo>,
+    },
+    /// Session deleted confirmation
+    SessionDeleted {
+        session_id: String,
+    },
     /// Shutdown acknowledgment
     ShuttingDown,
+}
+
+/// Information about a saved chat session
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionInfo {
+    pub id: String,
+    pub title: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub last_activity: DateTime<Utc>,
+    pub message_count: usize,
+    pub cwd: String,
 }
 
 /// Information about a running agent
