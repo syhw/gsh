@@ -256,6 +256,46 @@ pub fn latest_log_file(log_dir: &Path) -> Result<Option<PathBuf>> {
     Ok(files.into_iter().last())
 }
 
+/// Read new events from a JSONL log file starting at a byte offset.
+/// Returns the new events and the updated byte offset.
+pub fn read_events_incremental(path: &Path, offset: u64) -> Result<(Vec<ObservabilityEvent>, u64)> {
+    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+
+    let mut file = File::open(path)
+        .with_context(|| format!("Failed to open log file: {:?}", path))?;
+
+    // Get current file size
+    let file_size = file.metadata()?.len();
+
+    // Nothing new to read
+    if offset >= file_size {
+        return Ok((Vec::new(), offset));
+    }
+
+    // Seek to the offset
+    file.seek(SeekFrom::Start(offset))?;
+    let reader = BufReader::new(file);
+    let mut events = Vec::new();
+    let mut bytes_read = offset;
+
+    for line in reader.lines() {
+        let line = line.context("Failed to read line")?;
+        bytes_read += line.len() as u64 + 1; // +1 for newline
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<ObservabilityEvent>(&line) {
+            Ok(event) => events.push(event),
+            Err(e) => {
+                // Skip malformed lines (could be partial write)
+                debug!("Skipping malformed line at offset {}: {}", bytes_read, e);
+            }
+        }
+    }
+
+    Ok((events, bytes_read))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

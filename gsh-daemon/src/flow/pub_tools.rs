@@ -396,7 +396,7 @@ impl PublicationToolHandler {
 
         // If consensus_only and we had other filters, filter again
         if input.consensus_only && (input.author.is_some() || input.node.is_some()) {
-            let threshold = 2; // TODO: Get from store
+            let threshold = self.store.consensus_threshold();
             results.retain(|p| p.meets_consensus(threshold));
         }
 

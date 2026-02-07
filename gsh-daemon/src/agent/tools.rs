@@ -108,9 +108,9 @@ impl ToolExecutor {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {
+                        "file_path": {
                             "type": "string",
-                            "description": "Path to the file to read"
+                            "description": "Absolute path to the file to read"
                         },
                         "start_line": {
                             "type": "integer",
@@ -121,7 +121,7 @@ impl ToolExecutor {
                             "description": "Optional: stop reading at this line (inclusive)"
                         }
                     },
-                    "required": ["path"]
+                    "required": ["file_path"]
                 }),
             });
         }
@@ -133,16 +133,16 @@ impl ToolExecutor {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {
+                        "file_path": {
                             "type": "string",
-                            "description": "Path to the file to write"
+                            "description": "Absolute path to the file to write"
                         },
                         "content": {
                             "type": "string",
                             "description": "Content to write to the file"
                         }
                     },
-                    "required": ["path", "content"]
+                    "required": ["file_path", "content"]
                 }),
             });
         }
@@ -154,9 +154,9 @@ impl ToolExecutor {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "path": {
+                        "file_path": {
                             "type": "string",
-                            "description": "Path to the file to edit"
+                            "description": "Absolute path to the file to edit"
                         },
                         "old_text": {
                             "type": "string",
@@ -167,7 +167,7 @@ impl ToolExecutor {
                             "description": "The text to replace it with"
                         }
                     },
-                    "required": ["path", "old_text", "new_text"]
+                    "required": ["file_path", "old_text", "new_text"]
                 }),
             });
         }
@@ -300,9 +300,14 @@ impl ToolExecutor {
     }
 
     async fn exec_read(&self, input: &serde_json::Value) -> Result<String> {
+        // Debug: log the actual input received
+        tracing::debug!("read tool input: {}", serde_json::to_string(input).unwrap_or_default());
+
+        // Accept both "path" and "file_path" for compatibility with different models
         let path_str = input["path"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+            .or_else(|| input["file_path"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'path' or 'file_path' parameter. Received: {}", input))?;
 
         let path = self.resolve_path(path_str);
 
@@ -348,9 +353,10 @@ impl ToolExecutor {
     }
 
     async fn exec_write(&self, input: &serde_json::Value) -> Result<String> {
-        let path_str = input["path"]
+        let path_str = input["file_path"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+            .or_else(|| input["path"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'file_path' parameter"))?;
 
         let content = input["content"]
             .as_str()
@@ -377,9 +383,10 @@ impl ToolExecutor {
     }
 
     async fn exec_edit(&self, input: &serde_json::Value) -> Result<String> {
-        let path_str = input["path"]
+        let path_str = input["file_path"]
             .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
+            .or_else(|| input["path"].as_str())
+            .ok_or_else(|| anyhow::anyhow!("Missing 'file_path' parameter"))?;
 
         let old_text = input["old_text"]
             .as_str()

@@ -111,6 +111,12 @@ pub enum EventKind {
         cache_creation_tokens: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
+        /// Provider name (for per-model dashboard tracking)
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        provider: Option<String>,
+        /// Model name (for per-model dashboard tracking)
+        #[serde(skip_serializing_if = "Option::is_none", default)]
+        model: Option<String>,
     },
 
     /// Agent was paused (steering control)
@@ -201,6 +207,8 @@ mod tests {
                 cache_read_tokens: Some(200),
                 cache_creation_tokens: None,
                 cost_usd: Some(0.015),
+                provider: Some("anthropic".to_string()),
+                model: Some("claude-sonnet-4".to_string()),
             },
         );
 

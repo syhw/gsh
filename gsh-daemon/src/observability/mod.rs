@@ -36,7 +36,7 @@ pub mod logger;
 pub use cost::{AccumulatedUsage, CostTracker, ModelPricing, get_model_pricing};
 pub use dashboard::{run_dashboard, run_dashboard_with_dir, Dashboard};
 pub use events::{AgentRunSummary, EventKind, ObservabilityEvent};
-pub use logger::{EventLogger, LoggerConfig, list_log_files, latest_log_file, read_events};
+pub use logger::{EventLogger, LoggerConfig, list_log_files, latest_log_file, read_events, read_events_incremental};
 
 use crate::provider::UsageStats;
 use anyhow::Result;
@@ -129,6 +129,8 @@ impl Observer {
                 cache_read_tokens: usage.cache_read_tokens,
                 cache_creation_tokens: usage.cache_creation_tokens,
                 cost_usd: cost,
+                provider: Some(provider.to_string()),
+                model: Some(model.to_string()),
             },
         );
     }

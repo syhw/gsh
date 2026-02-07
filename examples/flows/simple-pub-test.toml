@@ -19,12 +19,10 @@ allow_self_review = false
 max_total_iterations = 50
 timeout_secs = 300
 
-# Two parallel researchers
+# Single researcher (count not implemented yet)
 [nodes.researchers]
-name = "Researchers"
+name = "Researcher"
 description = "Find interesting things in the codebase"
-count = 2
-parallel = true
 publication_tags = ["finding"]
 max_iterations = 10
 next = "synthesizer"

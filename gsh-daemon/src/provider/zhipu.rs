@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::pin::Pin;
 use futures_util::StreamExt;
 
@@ -70,6 +71,14 @@ struct ZhipuRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Request usage stats in the final streaming chunk
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<ZhipuStreamOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct ZhipuStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -159,6 +168,8 @@ struct ZhipuChoice {
 #[derive(Debug, Deserialize)]
 struct ZhipuStreamResponse {
     choices: Vec<ZhipuStreamChoice>,
+    /// Usage stats (only present in the final chunk when stream_options.include_usage is true)
+    usage: Option<ZhipuUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +286,85 @@ fn convert_tools(tools: &[ToolDefinition]) -> Vec<ZhipuTool> {
     }).collect()
 }
 
+/// Accumulated state for deferred MessageComplete emission.
+/// Zhipu (OpenAI-compatible) sends finish_reason and usage in separate chunks,
+/// so we accumulate them and only emit MessageComplete when [DONE] arrives.
+struct ZhipuPendingComplete {
+    usage: Option<UsageStats>,
+    stop_reason: Option<String>,
+}
+
+/// Process a single SSE data payload and return all events it produces.
+/// A single payload can produce multiple events (e.g., ToolUseStart + ToolUseInputDelta
+/// when name and arguments arrive in the same chunk).
+fn process_sse_data(
+    data: &str,
+    tool_calls: &mut Vec<(String, String, String)>,
+    pending: &mut ZhipuPendingComplete,
+) -> Vec<StreamEvent> {
+    let mut events = Vec::new();
+
+    if data == "[DONE]" {
+        // Emit the final MessageComplete with any accumulated usage/stop_reason
+        events.push(StreamEvent::MessageComplete {
+            usage: pending.usage.take(),
+            stop_reason: pending.stop_reason.take(),
+        });
+        return events;
+    }
+
+    if let Ok(resp) = serde_json::from_str::<ZhipuStreamResponse>(data) {
+        if let Some(choice) = resp.choices.first() {
+            if let Some(content) = &choice.delta.content {
+                if !content.is_empty() {
+                    events.push(StreamEvent::TextDelta(content.clone()));
+                }
+            }
+
+            if let Some(tcs) = &choice.delta.tool_calls {
+                for tc in tcs {
+                    let idx = tc.index;
+                    while tool_calls.len() <= idx {
+                        tool_calls.push((String::new(), String::new(), String::new()));
+                    }
+
+                    if let Some(id) = &tc.id {
+                        tool_calls[idx].0 = id.clone();
+                    }
+
+                    if let Some(func) = &tc.function {
+                        if let Some(name) = &func.name {
+                            tool_calls[idx].1 = name.clone();
+                            events.push(StreamEvent::ToolUseStart {
+                                id: tool_calls[idx].0.clone(),
+                                name: name.clone(),
+                            });
+                        }
+                        if let Some(args) = &func.arguments {
+                            if !args.is_empty() {
+                                tool_calls[idx].2.push_str(args);
+                                events.push(StreamEvent::ToolUseInputDelta(args.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Store finish_reason but don't emit MessageComplete yet - wait for [DONE]
+            if let Some(ref finish_reason) = choice.finish_reason {
+                pending.stop_reason = Some(finish_reason.clone());
+            }
+        }
+
+        // Accumulate usage from the usage-only chunk
+        if let Some(usage) = resp.usage {
+            pending.usage = Some(usage.into());
+        }
+    }
+
+    events
+}
+
 #[async_trait]
 impl Provider for ZhipuProvider {
     fn name(&self) -> &str {
@@ -314,6 +404,7 @@ impl Provider for ZhipuProvider {
             tools: tools.map(convert_tools),
             stream: None,
             temperature: Some(0.7),
+            stream_options: None,
         };
 
         let response = self
@@ -399,6 +490,7 @@ impl Provider for ZhipuProvider {
             tools: tools.map(convert_tools),
             stream: Some(true),
             temperature: Some(0.7),
+            stream_options: Some(ZhipuStreamOptions { include_usage: true }),
         };
 
         let response = self
@@ -434,85 +526,32 @@ impl Provider for ZhipuProvider {
             }
         }
 
+        // State: (stream, buffer, tool_calls_state, event_queue, pending_complete)
+        // event_queue buffers events when a single SSE payload produces multiple
+        // pending_complete accumulates usage and stop_reason across chunks
+        let initial_pending = ZhipuPendingComplete { usage: None, stop_reason: None };
         let event_stream = futures_util::stream::unfold(
-            (stream, initial_buffer, Vec::<(String, String, String)>::new()),
-            |(mut stream, mut buffer, mut tool_calls)| async move {
+            (stream, initial_buffer, Vec::<(String, String, String)>::new(), VecDeque::<StreamEvent>::new(), initial_pending),
+            |(mut stream, mut buffer, mut tool_calls, mut event_queue, mut pending)| async move {
                 loop {
+                    // Drain queued events first (one per iteration)
+                    if let Some(event) = event_queue.pop_front() {
+                        return Some((event, (stream, buffer, tool_calls, event_queue, pending)));
+                    }
+
+                    // Parse double-newline delimited SSE events
                     while let Some(pos) = buffer.find("\n\n") {
                         let event_str = buffer[..pos].to_string();
                         buffer = buffer[pos + 2..].to_string();
 
                         for line in event_str.lines() {
                             if let Some(data) = line.strip_prefix("data: ") {
-                                if data == "[DONE]" {
-                                    return Some((
-                                        StreamEvent::MessageComplete {
-                                            usage: None,
-                                            stop_reason: None,
-                                        },
-                                        (stream, buffer, tool_calls),
-                                    ));
-                                }
-
-                                if let Ok(resp) = serde_json::from_str::<ZhipuStreamResponse>(data) {
-                                    if let Some(choice) = resp.choices.first() {
-                                        if let Some(content) = &choice.delta.content {
-                                            if !content.is_empty() {
-                                                return Some((
-                                                    StreamEvent::TextDelta(content.clone()),
-                                                    (stream, buffer, tool_calls),
-                                                ));
-                                            }
-                                        }
-
-                                        if let Some(tcs) = &choice.delta.tool_calls {
-                                            for tc in tcs {
-                                                let idx = tc.index;
-                                                while tool_calls.len() <= idx {
-                                                    tool_calls.push((String::new(), String::new(), String::new()));
-                                                }
-
-                                                if let Some(id) = &tc.id {
-                                                    tool_calls[idx].0 = id.clone();
-                                                }
-                                                if let Some(func) = &tc.function {
-                                                    if let Some(name) = &func.name {
-                                                        tool_calls[idx].1 = name.clone();
-                                                        return Some((
-                                                            StreamEvent::ToolUseStart {
-                                                                id: tool_calls[idx].0.clone(),
-                                                                name: name.clone(),
-                                                            },
-                                                            (stream, buffer, tool_calls),
-                                                        ));
-                                                    }
-                                                    if let Some(args) = &func.arguments {
-                                                        tool_calls[idx].2.push_str(args);
-                                                        return Some((
-                                                            StreamEvent::ToolUseInputDelta(args.clone()),
-                                                            (stream, buffer, tool_calls),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        if choice.finish_reason.is_some() {
-                                            return Some((
-                                                StreamEvent::MessageComplete {
-                                                    usage: None,
-                                                    stop_reason: choice.finish_reason.clone(),
-                                                },
-                                                (stream, buffer, tool_calls),
-                                            ));
-                                        }
-                                    }
-                                }
+                                event_queue.extend(process_sse_data(data, &mut tool_calls, &mut pending));
                             }
                         }
                     }
 
-                    // Also try parsing newline-delimited JSON (some APIs use this)
+                    // Parse single-newline delimited lines (some APIs use this)
                     while let Some(pos) = buffer.find('\n') {
                         let line = buffer[..pos].to_string();
                         buffer = buffer[pos + 1..].to_string();
@@ -521,43 +560,16 @@ impl Provider for ZhipuProvider {
                             continue;
                         }
 
-                        // Handle data: prefix if present
-                        let json_str = line.strip_prefix("data: ").unwrap_or(&line);
-
-                        if json_str == "[DONE]" {
-                            return Some((
-                                StreamEvent::MessageComplete {
-                                    usage: None,
-                                    stop_reason: None,
-                                },
-                                (stream, buffer, tool_calls),
-                            ));
-                        }
-
-                        if let Ok(resp) = serde_json::from_str::<ZhipuStreamResponse>(json_str) {
-                            if let Some(choice) = resp.choices.first() {
-                                if let Some(content) = &choice.delta.content {
-                                    if !content.is_empty() {
-                                        return Some((
-                                            StreamEvent::TextDelta(content.clone()),
-                                            (stream, buffer, tool_calls),
-                                        ));
-                                    }
-                                }
-
-                                if choice.finish_reason.is_some() {
-                                    return Some((
-                                        StreamEvent::MessageComplete {
-                                            usage: None,
-                                            stop_reason: choice.finish_reason.clone(),
-                                        },
-                                        (stream, buffer, tool_calls),
-                                    ));
-                                }
-                            }
-                        }
+                        let data = line.strip_prefix("data: ").unwrap_or(&line);
+                        event_queue.extend(process_sse_data(data, &mut tool_calls, &mut pending));
                     }
 
+                    // If we collected any events, loop back to drain them
+                    if !event_queue.is_empty() {
+                        continue;
+                    }
+
+                    // Need more data from the stream
                     match stream.next().await {
                         Some(Ok(chunk)) => {
                             buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -565,10 +577,31 @@ impl Provider for ZhipuProvider {
                         Some(Err(e)) => {
                             return Some((
                                 StreamEvent::Error(ProviderError::NetworkError(e.to_string())),
-                                (stream, buffer, tool_calls),
+                                (stream, buffer, tool_calls, event_queue, pending),
                             ));
                         }
-                        None => return None,
+                        None => {
+                            // Try parsing any remaining buffer content
+                            if !buffer.is_empty() {
+                                let data = buffer.strip_prefix("data: ").unwrap_or(&buffer);
+                                event_queue.extend(process_sse_data(data, &mut tool_calls, &mut pending));
+                                buffer.clear();
+                                if !event_queue.is_empty() {
+                                    continue;
+                                }
+                            }
+                            // If stream ends without [DONE], emit pending MessageComplete
+                            if pending.usage.is_some() || pending.stop_reason.is_some() {
+                                return Some((
+                                    StreamEvent::MessageComplete {
+                                        usage: pending.usage.take(),
+                                        stop_reason: pending.stop_reason.take(),
+                                    },
+                                    (stream, buffer, tool_calls, event_queue, pending),
+                                ));
+                            }
+                            return None;
+                        }
                     }
                 }
             },

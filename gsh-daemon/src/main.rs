@@ -128,6 +128,12 @@ async fn run_daemon(config: config::Config) -> Result<()> {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         info!("Received shutdown signal");
+        // Clean up tmux sessions spawned by flows
+        info!("Cleaning up tmux sessions...");
+        let killed_sessions = tmux::TmuxManager::cleanup_all_sessions();
+        if !killed_sessions.is_empty() {
+            info!("Killed {} tmux session(s): {}", killed_sessions.len(), killed_sessions.join(", "));
+        }
         // Clean up socket
         let _ = std::fs::remove_file(&socket_path_clone);
         std::process::exit(0);

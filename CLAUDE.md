@@ -1,48 +1,77 @@
 # gsh - Agentic Shell
 
-A zsh plugin + Rust daemon for an agentic coding CLI. The daemon captures shell context and provides LLM-powered assistance with tool use.
+A zsh plugin + Rust daemon for an agentic coding CLI. The daemon captures shell context and provides LLM-powered assistance with multi-agent orchestration, flow-based execution, and tmux-based subagent isolation.
 
 ## Architecture
 
 ```
-┌─────────────────┐     Unix Socket      ┌──────────────────┐
-│   Zsh Plugin    │ ──────────────────▶  │   gsh-daemon     │
-│ (gsh.plugin.zsh)│                      │                  │
-└─────────────────┘                      │  ┌────────────┐  │
-        │                                │  │  Context   │  │
-        │ preexec/precmd/chpwd hooks     │  │ Accumulator│  │
-        ▼                                │  └────────────┘  │
-┌─────────────────┐                      │  ┌────────────┐  │
-│    gsh-cli      │ ──────────────────▶  │  │  Provider  │──┼──▶ Anthropic/OpenAI
-│  (gsh binary)   │     Prompt/Chat      │  │  (LLM API) │  │
-└─────────────────┘                      │  └────────────┘  │
-                                         │  ┌────────────┐  │
-                                         │  │   Agent    │  │
-                                         │  │  + Tools   │  │
-                                         │  └────────────┘  │
-                                         └──────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              gsh-daemon (gshd)                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐ │
+│  │   Session   │  │    Agent    │  │    Flow     │  │      Provider       │ │
+│  │   Manager   │  │   Manager   │  │   Engine    │  │      Registry       │ │
+│  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────────────┘ │
+│         │                │                │                    │            │
+│         ▼                ▼                ▼                    ▼            │
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                         Tmux Session Manager                            ││
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐               ││
+│  │  │ gsh-root │  │ agent-1  │  │ agent-2  │  │ agent-N  │  (attachable) ││
+│  │  │ (user UI)│  │ (hidden) │  │ (hidden) │  │ (hidden) │               ││
+│  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘               ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+│  ┌─────────────────────────────────────────────────────────────────────────┐│
+│  │                         Observability (JSONL)                           ││
+│  └─────────────────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────────────────┘
+           │                  │                  │                  │
+           ▼                  ▼                  ▼                  ▼
+    ┌────────────┐     ┌────────────┐     ┌────────────┐     ┌────────────┐
+    │  Anthropic │     │   OpenAI   │     │   Zhipu    │     │  Together  │
+    │  (Claude)  │     │  (GPT/o3)  │     │  (GLM-4)   │     │  (Kimi K2) │
+    └────────────┘     └────────────┘     └────────────┘     └────────────┘
 ```
 
 ## Project Structure
 
 ```
 gsh_claude/
-├── Cargo.toml              # Workspace root
-├── config.example.toml     # Example configuration
-├── gsh.plugin.zsh          # Zsh plugin (hooks, llm command)
-├── gsh-daemon/             # Daemon crate
+├── Cargo.toml                    # Workspace root
+├── config.example.toml           # Example configuration
+├── gsh.plugin.zsh                # Zsh plugin (hooks, llm command)
+├── examples/flows/               # Example flow definitions
+├── gsh-daemon/                   # Daemon crate
 │   └── src/
-│       ├── main.rs         # Socket server, message routing
-│       ├── config.rs       # TOML configuration
-│       ├── protocol.rs     # JSON message types
-│       ├── state.rs        # Shared daemon state
-│       ├── context/        # Shell event accumulation
-│       ├── provider/       # LLM API clients (Anthropic, OpenAI)
-│       ├── agent/          # Agentic loop + tool execution
-│       ├── session/        # Chat session management
-│       └── tmux/           # Tmux integration (future)
-└── gsh-cli/                # CLI client crate
-    └── src/main.rs         # Thin client for daemon communication
+│       ├── main.rs               # Socket server, message routing
+│       ├── config.rs             # TOML configuration
+│       ├── protocol.rs           # JSON message types
+│       ├── state.rs              # Shared daemon state
+│       ├── context/              # Shell event accumulation
+│       │   └── accumulator.rs    # Command history, cwd tracking
+│       ├── provider/             # LLM API clients
+│       │   ├── mod.rs            # Provider trait, factory
+│       │   ├── anthropic.rs      # Claude API
+│       │   ├── openai.rs         # OpenAI/compatible APIs
+│       │   ├── zhipu.rs          # GLM-4 (Zhipu AI)
+│       │   ├── together.rs       # Together.AI (Kimi K2, Qwen)
+│       │   └── ollama.rs         # Local models via Ollama
+│       ├── agent/                # Agentic loop + tool execution
+│       │   ├── mod.rs            # Agent struct, event loop
+│       │   └── tools.rs          # Tool definitions & execution
+│       ├── session/              # Chat session management
+│       ├── flow/                 # Flow-based orchestration
+│       │   ├── mod.rs            # Flow, Node, Edge types
+│       │   ├── engine.rs         # Flow execution engine
+│       │   ├── parser.rs         # TOML flow parser
+│       │   ├── publication.rs    # Publication store for consensus
+│       │   └── pub_tools.rs      # Publication tools (publish, review, cite)
+│       ├── tmux/                 # Tmux session management
+│       │   └── manager.rs        # Spawn, attach, cleanup sessions
+│       └── observability/        # Logging and metrics
+│           └── mod.rs            # JSONL logging, dashboard
+└── gsh-cli/                      # CLI client crate
+    └── src/main.rs               # Thin client for daemon communication
 ```
 
 ## Build & Run
@@ -57,19 +86,25 @@ cargo build --release
 # Use CLI (in another terminal)
 source gsh.plugin.zsh
 llm what files are here
+
+# Run a flow
+llm --flow code-review "Review my recent changes"
+
+# Open observability dashboard
+./target/release/gsh-daemon dashboard
 ```
 
 ## Configuration
 
 Config file: `~/.config/gsh/config.toml`
 
-Required: Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` environment variable, or configure in the TOML file.
+Required: Set API key for at least one provider via environment variable or config file.
 
 ## Key Components
 
 ### Protocol (`gsh-daemon/src/protocol.rs`)
-- `ShellMessage`: Messages from shell/CLI to daemon (Preexec, Postcmd, Chpwd, Prompt, Chat*)
-- `DaemonMessage`: Responses from daemon (Ack, TextChunk, ToolUse, ToolResult, Error)
+- `ShellMessage`: Messages from shell/CLI to daemon (Preexec, Postcmd, Chpwd, Prompt, ListAgents, KillAgent, etc.)
+- `DaemonMessage`: Responses from daemon (Ack, TextChunk, ToolUse, ToolResult, AgentList, Error)
 
 ### Context Accumulator (`gsh-daemon/src/context/accumulator.rs`)
 - Tracks shell commands, exit codes, durations, directory changes
@@ -79,17 +114,39 @@ Required: Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` environment variable, or c
 ### Provider (`gsh-daemon/src/provider/`)
 - `Provider` trait with `chat()` and `chat_stream()` methods
 - `AnthropicProvider`: Claude API with streaming SSE parsing
-- `OpenAIProvider`: OpenAI/compatible APIs
+- `OpenAIProvider`: OpenAI/compatible APIs with reasoning support
+- `ZhipuProvider`: GLM-4 models (Chinese language optimized)
+- `TogetherProvider`: Together.AI (Kimi K2.5, Qwen3-Coder)
+- `OllamaProvider`: Local models
 
 ### Agent (`gsh-daemon/src/agent/`)
 - Agentic loop: prompt → LLM → tool calls → execute → loop
-- Tools: bash, read, write, edit, glob, grep
+- Built-in tools: bash, read, write, edit, glob, grep
+- Extensible via `CustomToolHandler` trait (e.g., publication tools)
 - Streams events back to client during execution
+- Observability integration for logging and metrics
+
+### Flow Engine (`gsh-daemon/src/flow/`)
+- TOML-based flow definitions
+- Sequential, conditional, and parallel execution
+- Publication/review coordination mode (schrd-style consensus)
+- Each node can specify role, tools, model override
+
+### Tmux Manager (`gsh-daemon/src/tmux/`)
+- Spawns subagent sessions: `gsh-agent-NNNN`
+- Attach/detach for debugging
+- Automatic cleanup on daemon shutdown
+
+### Observability (`gsh-daemon/src/observability/`)
+- JSONL structured logging of all events
+- Token usage tracking per provider/model
+- TUI dashboard for monitoring flows
 
 ### CLI (`gsh-cli/src/main.rs`)
 - Thin client that connects to daemon socket
 - Supports: `gsh <prompt>`, `gsh chat`, `gsh status`, `gsh stop`
-- Stdin support: `echo "prompt" | gsh` or `gsh - < file.txt`
+- Flow execution: `gsh --flow <name> <prompt>`
+- Provider/model override: `gsh --provider openai --model gpt-4o <prompt>`
 
 ## Common Development Tasks
 
@@ -104,11 +161,16 @@ Required: Set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` environment variable, or c
 3. Add to `create_provider()` in `gsh-daemon/src/provider/mod.rs`
 4. Add config structs in `gsh-daemon/src/config.rs`
 
-### Adding a new shell message type
-1. Add variant to `ShellMessage` in `gsh-daemon/src/protocol.rs`
-2. Handle in `process_message()` in `gsh-daemon/src/main.rs`
-3. Add corresponding `DaemonMessage` response if needed
-4. Update CLI if client needs to send this message
+### Adding a new flow
+1. Create TOML file in `~/.config/gsh/flows/<name>.toml`
+2. Define nodes with roles, tools, model preferences
+3. Define edges for routing (sequential, conditional, parallel)
+4. Test with `llm --flow <name> "<prompt>"`
+
+### Adding custom tool handlers
+1. Implement `CustomToolHandler` trait in your module
+2. Add handler to agent via `agent.with_custom_handler(Arc::new(handler))`
+3. Handler's tools will be available alongside built-in tools
 
 ## Testing
 
@@ -125,7 +187,6 @@ Example exchange:
 ```json
 → {"type":"prompt","query":"list files","cwd":"/home/user","session_id":null,"stream":true}
 ← {"type":"text_chunk","text":"Here are","done":false}
-← {"type":"text_chunk","text":" the files:","done":false}
 ← {"type":"tool_use","tool":"bash","input":{"command":"ls -la"}}
 ← {"type":"tool_result","tool":"bash","output":"...","success":true}
 ← {"type":"text_chunk","text":"\n\nDone!","done":true}
@@ -135,6 +196,12 @@ Example exchange:
 
 - `ANTHROPIC_API_KEY` - Anthropic API key
 - `OPENAI_API_KEY` - OpenAI API key
+- `ZAI_API_KEY` - Zhipu AI API key
+- `TOGETHER_API_KEY` - Together.AI API key
 - `GSH_SOCKET` - Override socket path (default: `/tmp/gsh-$USER.sock`)
 - `GSH_ENABLED` - Set to `0` to disable context tracking in shell
 - `GSH_QUIET` - Set to `1` to suppress plugin load message
+
+## Current Work
+
+See `TODO.claude` for active development tasks and known issues.

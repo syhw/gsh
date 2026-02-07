@@ -283,6 +283,14 @@ Guidelines:
                 }
             }
 
+            // Safety net: if stream ended without MessageComplete, save any
+            // accumulated tool input that wasn't flushed
+            if let Some(idx) = current_tool_idx {
+                if !current_tool_input.is_empty() && tool_uses[idx].2.is_empty() {
+                    tool_uses[idx].2 = std::mem::take(&mut current_tool_input);
+                }
+            }
+
             // If no tool uses, we're done
             if tool_uses.is_empty() {
                 final_text = response_text;
@@ -317,8 +325,16 @@ Guidelines:
             let mut tool_results = Vec::new();
 
             for (id, name, input_json) in tool_uses {
-                let input: serde_json::Value = serde_json::from_str(&input_json)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                // Debug: log the raw input JSON
+                tracing::debug!("Tool '{}' raw input_json: '{}'", name, input_json);
+
+                let input: serde_json::Value = match serde_json::from_str(&input_json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!("Failed to parse tool input JSON for '{}': {}. Raw: '{}'", name, e, input_json);
+                        serde_json::Value::Object(serde_json::Map::new())
+                    }
+                };
 
                 // Log tool call
                 self.log_event(EventKind::tool_call(&name, input.clone()));

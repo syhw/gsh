@@ -6,8 +6,9 @@
 //! - Token usage and cost tracking
 //! - Log file tailing
 
+use super::cost::get_model_pricing;
 use super::events::{EventKind, ObservabilityEvent};
-use super::{latest_log_file, read_events, AccumulatedUsage};
+use super::{latest_log_file, read_events, read_events_incremental, AccumulatedUsage};
 use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
@@ -28,6 +29,8 @@ pub struct Dashboard {
     log_dir: PathBuf,
     /// Current log file
     current_log: Option<PathBuf>,
+    /// Byte offset for incremental file reading
+    file_offset: u64,
     /// Loaded events
     events: Vec<ObservabilityEvent>,
     /// Accumulated usage
@@ -49,6 +52,7 @@ impl Dashboard {
         Self {
             log_dir,
             current_log: None,
+            file_offset: 0,
             events: Vec::new(),
             usage: AccumulatedUsage::default(),
             scroll_offset: 0,
@@ -148,45 +152,86 @@ impl Dashboard {
     fn refresh(&mut self) -> Result<()> {
         // Find latest log file
         if let Ok(Some(log_file)) = latest_log_file(&self.log_dir) {
-            // Only reload if file changed
+            // If log file changed, reset everything and do a full read
             if self.current_log.as_ref() != Some(&log_file) {
                 self.current_log = Some(log_file.clone());
                 self.events.clear();
                 self.usage = AccumulatedUsage::default();
+                self.file_offset = 0;
+
+                // Full read for new file
+                if let Ok(events) = read_events(&log_file) {
+                    for event in &events {
+                        Self::accumulate_usage(&mut self.usage, event);
+                    }
+                    self.file_offset = std::fs::metadata(&log_file)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    self.events = events;
+                }
+            } else {
+                // Incremental read - only new bytes since last offset
+                if let Ok((new_events, new_offset)) =
+                    read_events_incremental(&log_file, self.file_offset)
+                {
+                    for event in &new_events {
+                        Self::accumulate_usage(&mut self.usage, event);
+                    }
+                    self.events.extend(new_events);
+                    self.file_offset = new_offset;
+                }
             }
 
-            // Read events
-            if let Ok(events) = read_events(&log_file) {
-                self.events = events;
-
-                // Calculate usage from events
-                self.usage = AccumulatedUsage::default();
-                for event in &self.events {
-                    if let EventKind::Usage {
-                        input_tokens,
-                        output_tokens,
-                        cost_usd,
-                        ..
-                    } = &event.event
-                    {
-                        self.usage.total_input_tokens += input_tokens;
-                        self.usage.total_output_tokens += output_tokens;
-                        self.usage.request_count += 1;
-                        if let Some(cost) = cost_usd {
-                            self.usage.estimated_cost_usd += cost;
-                        }
-                    }
-                }
-
-                // Auto-scroll to bottom
-                if self.auto_scroll && !self.events.is_empty() {
-                    self.scroll_offset = self.events.len().saturating_sub(1);
-                }
+            // Auto-scroll to bottom
+            if self.auto_scroll && !self.events.is_empty() {
+                self.scroll_offset = self.events.len().saturating_sub(1);
             }
         }
 
         self.last_refresh = Instant::now();
         Ok(())
+    }
+
+    /// Accumulate usage stats from a single event (including per-model breakdown)
+    fn accumulate_usage(usage: &mut AccumulatedUsage, event: &ObservabilityEvent) {
+        if let EventKind::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cost_usd,
+            provider,
+            model,
+            ..
+        } = &event.event
+        {
+            usage.total_input_tokens += input_tokens;
+            usage.total_output_tokens += output_tokens;
+            usage.total_cache_read_tokens += cache_read_tokens.unwrap_or(0);
+            usage.request_count += 1;
+
+            // Calculate cost: prefer the pre-calculated cost_usd, fall back to pricing table
+            let cost = if let Some(c) = cost_usd {
+                *c
+            } else if let (Some(prov), Some(mdl)) = (provider, model) {
+                get_model_pricing(prov, mdl)
+                    .map(|p| p.calculate(*input_tokens, *output_tokens, *cache_read_tokens))
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            usage.estimated_cost_usd += cost;
+
+            // Per-model breakdown (requires provider/model from newer events)
+            if let (Some(prov), Some(mdl)) = (provider, model) {
+                let model_key = format!("{}:{}", prov, mdl);
+                let model_usage = usage.by_model.entry(model_key).or_default();
+                model_usage.input_tokens += input_tokens;
+                model_usage.output_tokens += output_tokens;
+                model_usage.cache_read_tokens += cache_read_tokens.unwrap_or(0);
+                model_usage.request_count += 1;
+                model_usage.estimated_cost_usd += cost;
+            }
+        }
     }
 
     fn draw(&self, frame: &mut Frame) {
@@ -256,12 +301,27 @@ impl Dashboard {
     }
 
     fn draw_events(&self, frame: &mut Frame, area: Rect) {
+        // Inner height = area minus top/bottom border
+        let inner_height = area.height.saturating_sub(2) as usize;
+
+        // Calculate which events to show:
+        // scroll_offset points to the "target" event.
+        // In auto-scroll mode, it points to the last event, and we want it at the bottom.
+        // In manual mode, we center around scroll_offset.
+        let start_idx = if self.auto_scroll {
+            // Latest event at the bottom of the viewport
+            self.events.len().saturating_sub(inner_height)
+        } else {
+            // Center scroll_offset in viewport
+            self.scroll_offset.saturating_sub(inner_height / 2)
+        };
+
         let items: Vec<ListItem> = self
             .events
             .iter()
             .enumerate()
-            .skip(self.scroll_offset.saturating_sub(area.height as usize / 2))
-            .take(area.height as usize)
+            .skip(start_idx)
+            .take(inner_height)
             .map(|(i, event)| {
                 let (symbol, color, text) = format_event(event);
                 let line = Line::from(vec![
@@ -514,15 +574,24 @@ fn format_event(event: &ObservabilityEvent) -> (&'static str, Color, String) {
             input_tokens,
             output_tokens,
             cost_usd,
+            provider,
+            model,
             ..
         } => {
             let cost = cost_usd
                 .map(|c| format!(" ${:.4}", c))
                 .unwrap_or_default();
+            let model_info = match (provider, model) {
+                (Some(p), Some(m)) => format!(" [{}:{}]", p, m),
+                _ => String::new(),
+            };
             (
                 "$",
                 Color::Yellow,
-                format!("Usage: {}in/{}out{}", input_tokens, output_tokens, cost),
+                format!(
+                    "Usage: {}in/{}out{}{}",
+                    input_tokens, output_tokens, cost, model_info
+                ),
             )
         }
         EventKind::Paused => ("||", Color::Yellow, "Paused".to_string()),

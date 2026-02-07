@@ -10,7 +10,7 @@ use crate::provider::{self};
 use crate::tmux::{AgentSessionConfig, TmuxManager};
 use anyhow::Result;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -176,13 +176,15 @@ impl FlowEngine {
     }
 
     /// Create a flow engine with publication mode support
-    pub fn with_publication_mode(config: Config, consensus_threshold: usize) -> Self {
+    pub fn with_publication_mode(config: Config, consensus_threshold: usize, allow_self_review: bool) -> Self {
         Self {
             config,
             tmux_manager: TmuxManager::new(),
             provider_overrides: HashMap::new(),
             model_overrides: HashMap::new(),
-            publication_store: Some(Arc::new(PublicationStore::new(consensus_threshold))),
+            publication_store: Some(Arc::new(
+                PublicationStore::new(consensus_threshold).with_self_review(allow_self_review),
+            )),
         }
     }
 
@@ -254,12 +256,14 @@ impl FlowEngine {
 
         // Initialize publication store if flow uses publication mode
         if flow.coordination.mode == CoordinationMode::Publication && self.publication_store.is_none() {
-            self.publication_store = Some(Arc::new(PublicationStore::new(
-                flow.coordination.consensus_threshold,
-            )));
+            self.publication_store = Some(Arc::new(
+                PublicationStore::new(flow.coordination.consensus_threshold)
+                    .with_self_review(flow.coordination.allow_self_review),
+            ));
             info!(
-                "Initialized publication mode with consensus threshold: {}",
-                flow.coordination.consensus_threshold
+                "Initialized publication mode with consensus threshold: {}, allow_self_review: {}",
+                flow.coordination.consensus_threshold,
+                flow.coordination.allow_self_review,
             );
         }
 
@@ -373,6 +377,31 @@ impl FlowEngine {
             base_prompt
         };
 
+        // In publication mode, inject publications from review_from nodes into the prompt
+        let prompt = if let Some(ref store) = self.publication_store {
+            if !node.review_from.is_empty() {
+                let mut review_pubs = Vec::new();
+                for from_node in &node.review_from {
+                    review_pubs.extend(store.by_node(from_node).await);
+                }
+                if !review_pubs.is_empty() {
+                    let pub_context = store.format_for_context(&review_pubs).await;
+                    format!(
+                        "{}\n\n--- Publications to review (from: {}) ---\n{}",
+                        prompt,
+                        node.review_from.join(", "),
+                        pub_context,
+                    )
+                } else {
+                    prompt
+                }
+            } else {
+                prompt
+            }
+        } else {
+            prompt
+        };
+
         // Determine provider: node override > role > engine override > config default
         let provider_name = node.provider.clone()
             .or_else(|| role.as_ref().and_then(|r| r.provider.clone()))
@@ -408,6 +437,9 @@ impl FlowEngine {
             );
             agent = agent.with_custom_handler(Arc::new(handler));
         }
+
+        // Capture publication snapshot before agent runs (for diffing)
+        let pub_snapshot = self.capture_pub_snapshot().await;
 
         // Create event channel for agent
         let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -466,6 +498,11 @@ impl FlowEngine {
         {
             let mut ctx_write = ctx.write().await;
             ctx_write.node_outputs.insert(node_id.to_string(), output.clone());
+        }
+
+        // Emit publication events (diff pre/post snapshots)
+        if let Some(ref pre) = pub_snapshot {
+            self.emit_pub_events(node_id, pre, event_tx).await;
         }
 
         // Determine next node
@@ -676,6 +713,95 @@ impl FlowEngine {
         }
     }
 
+    /// Capture a snapshot of publication state for diffing
+    async fn capture_pub_snapshot(&self) -> Option<PubSnapshot> {
+        let store = self.publication_store.as_ref()?;
+        let all = store.all().await;
+        let threshold = store.consensus_threshold();
+        Some(PubSnapshot {
+            ids: all.iter().map(|p| p.id.clone()).collect(),
+            review_counts: all.iter().map(|p| (p.id.clone(), p.reviews.len())).collect(),
+            consensus_ids: all
+                .iter()
+                .filter(|p| p.meets_consensus(threshold))
+                .map(|p| p.id.clone())
+                .collect(),
+        })
+    }
+
+    /// Emit publication flow events by diffing pre/post snapshots
+    async fn emit_pub_events(
+        &self,
+        node_id: &str,
+        pre: &PubSnapshot,
+        event_tx: &mpsc::Sender<FlowEvent>,
+    ) {
+        let store = match self.publication_store.as_ref() {
+            Some(s) => s,
+            None => return,
+        };
+
+        let all = store.all().await;
+        let threshold = store.consensus_threshold();
+        let post_ids: HashSet<String> = all.iter().map(|p| p.id.clone()).collect();
+        let post_consensus: HashSet<String> = all
+            .iter()
+            .filter(|p| p.meets_consensus(threshold))
+            .map(|p| p.id.clone())
+            .collect();
+
+        // Emit PublicationCreated for new publications
+        for pub_item in &all {
+            if !pre.ids.contains(&pub_item.id) {
+                let _ = event_tx
+                    .send(FlowEvent::PublicationCreated {
+                        node_id: node_id.to_string(),
+                        publication_id: pub_item.id.clone(),
+                        title: pub_item.title.clone(),
+                        author: pub_item.author.clone(),
+                    })
+                    .await;
+            }
+        }
+
+        // Emit PublicationReviewed for new reviews
+        for pub_item in &all {
+            let old_count = pre.review_counts.get(&pub_item.id).copied().unwrap_or(0);
+            if pub_item.reviews.len() > old_count {
+                for review in pub_item.reviews.iter().skip(old_count) {
+                    let _ = event_tx
+                        .send(FlowEvent::PublicationReviewed {
+                            publication_id: pub_item.id.clone(),
+                            reviewer: review.reviewer.clone(),
+                            grade: review.grade.to_string(),
+                            consensus_score: pub_item.consensus_score(),
+                        })
+                        .await;
+                }
+            }
+        }
+
+        // Emit PublicationConsensus for newly-reached consensus
+        for id in post_consensus.difference(&pre.consensus_ids) {
+            if let Some(pub_item) = all.iter().find(|p| &p.id == id) {
+                info!(
+                    "Publication '{}' ({}) reached consensus with {} accepts",
+                    pub_item.title, pub_item.id, pub_item.accept_count()
+                );
+                let _ = event_tx
+                    .send(FlowEvent::PublicationConsensus {
+                        publication_id: pub_item.id.clone(),
+                        title: pub_item.title.clone(),
+                        accept_count: pub_item.accept_count(),
+                    })
+                    .await;
+            }
+        }
+
+        // Suppress unused warning for post_ids (used for completeness)
+        let _ = post_ids;
+    }
+
     /// Evaluate a shell command as a condition (returns true if exit code is 0)
     async fn eval_shell_condition(&self, command: &str, cwd: &str) -> bool {
         let output = tokio::process::Command::new("sh")
@@ -693,6 +819,13 @@ impl FlowEngine {
             }
         }
     }
+}
+
+/// Snapshot of publication store state for diffing before/after node execution
+struct PubSnapshot {
+    ids: HashSet<String>,
+    review_counts: HashMap<String, usize>,
+    consensus_ids: HashSet<String>,
 }
 
 #[cfg(test)]

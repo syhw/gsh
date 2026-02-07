@@ -29,7 +29,6 @@ struct Cli {
     flow: Option<String>,
 
     /// One-shot prompt (shorthand for `gsh prompt "..."`)
-    #[arg(trailing_var_arg = true)]
     query: Vec<String>,
 }
 
@@ -304,9 +303,13 @@ async fn run_prompt(
             DaemonMessage::ToolUse { tool, input: _ } => {
                 eprintln!("\n[Using tool: {}]", tool);
             }
-            DaemonMessage::ToolResult { tool, output: _, success } => {
+            DaemonMessage::ToolResult { tool, output, success } => {
                 let status = if success { "OK" } else { "FAILED" };
                 eprintln!("[Tool {} {}]", tool, status);
+                // Show error output when tool fails
+                if !success && !output.is_empty() {
+                    eprintln!("  Error: {}", output.lines().next().unwrap_or(&output));
+                }
             }
             DaemonMessage::Response { text, .. } => {
                 println!("{}", text);
@@ -413,9 +416,12 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                 DaemonMessage::ToolUse { tool, .. } => {
                     eprintln!("\n[Using tool: {}]", tool);
                 }
-                DaemonMessage::ToolResult { tool, success, .. } => {
+                DaemonMessage::ToolResult { tool, output, success } => {
                     let status = if success { "OK" } else { "FAILED" };
                     eprintln!("[Tool {} {}]", tool, status);
+                    if !success && !output.is_empty() {
+                        eprintln!("  Error: {}", output.lines().next().unwrap_or(&output));
+                    }
                 }
                 DaemonMessage::Error { message, .. } => {
                     eprintln!("Error: {}", message);

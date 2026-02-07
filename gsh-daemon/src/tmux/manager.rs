@@ -484,6 +484,44 @@ impl TmuxManager {
         Ok(count)
     }
 
+    /// Kill all gsh-prefixed tmux sessions (for daemon shutdown cleanup)
+    /// Returns the list of session names that were killed
+    pub fn cleanup_all_sessions() -> Vec<String> {
+        // List all tmux sessions
+        let output = match Command::new("tmux")
+            .arg("list-sessions")
+            .arg("-F")
+            .arg("#{session_name}")
+            .output()
+        {
+            Ok(o) if o.status.success() => o,
+            _ => return Vec::new(),
+        };
+
+        let mut killed_sessions = Vec::new();
+        for session in String::from_utf8_lossy(&output.stdout).lines() {
+            if session.starts_with("gsh-") {
+                if Command::new("tmux")
+                    .arg("kill-session")
+                    .arg("-t")
+                    .arg(session)
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+                {
+                    tracing::debug!("Killed tmux session: {}", session);
+                    killed_sessions.push(session.to_string());
+                }
+            }
+        }
+
+        if !killed_sessions.is_empty() {
+            tracing::info!("Cleaned up {} tmux session(s): {}", killed_sessions.len(), killed_sessions.join(", "));
+        }
+
+        killed_sessions
+    }
+
     /// Check if a session exists
     #[allow(dead_code)]
     pub fn session_exists(&self, session: &str) -> bool {

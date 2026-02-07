@@ -137,6 +137,8 @@ pub struct PublicationStore {
     next_id: AtomicU64,
     /// Consensus threshold for filtering
     consensus_threshold: usize,
+    /// Whether agents can review their own publications
+    allow_self_review: bool,
 }
 
 impl PublicationStore {
@@ -146,7 +148,19 @@ impl PublicationStore {
             publications: RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             consensus_threshold,
+            allow_self_review: false,
         }
+    }
+
+    /// Set whether self-review is allowed (builder pattern)
+    pub fn with_self_review(mut self, allow: bool) -> Self {
+        self.allow_self_review = allow;
+        self
+    }
+
+    /// Get the consensus threshold
+    pub fn consensus_threshold(&self) -> usize {
+        self.consensus_threshold
     }
 
     /// Publish a new finding
@@ -226,8 +240,8 @@ impl PublicationStore {
             });
         }
 
-        // Can't review own publication
-        if publication.author == reviewer {
+        // Can't review own publication (unless allow_self_review is set)
+        if publication.author == reviewer && !self.allow_self_review {
             return Err(PublicationError::SelfReview);
         }
 
