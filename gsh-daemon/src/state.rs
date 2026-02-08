@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Shared daemon state
 pub struct DaemonState {
@@ -35,6 +35,21 @@ impl DaemonState {
         // Ensure session directory exists
         if let Err(e) = std::fs::create_dir_all(&session_dir) {
             warn!("Failed to create session directory {:?}: {}", session_dir, e);
+        }
+
+        // Run session cleanup on startup
+        match crate::session::cleanup_sessions(
+            &session_dir,
+            config.sessions.max_sessions,
+            config.sessions.max_age_days,
+        ) {
+            Ok(deleted) if deleted > 0 => {
+                info!("Session cleanup: removed {} old session(s)", deleted);
+            }
+            Err(e) => {
+                warn!("Session cleanup failed: {}", e);
+            }
+            _ => {}
         }
 
         // Create observer for logging

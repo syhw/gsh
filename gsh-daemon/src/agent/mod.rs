@@ -63,6 +63,8 @@ pub struct Agent {
     session_id: String,
     /// Agent ID within the session
     agent_id: String,
+    /// Flow name for cost aggregation (set when running inside a flow)
+    flow_name: Option<String>,
     /// Custom tool handlers (e.g., publication tools for flow coordination)
     custom_handlers: Vec<Arc<dyn CustomToolHandler>>,
 }
@@ -112,6 +114,7 @@ Guidelines:
             observer: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             agent_id: "root".to_string(),
+            flow_name: None,
             custom_handlers: Vec::new(),
         }
     }
@@ -140,6 +143,12 @@ Guidelines:
         self
     }
 
+    /// Set the flow name for cost aggregation
+    pub fn with_flow_name(mut self, flow_name: impl Into<String>) -> Self {
+        self.flow_name = Some(flow_name.into());
+        self
+    }
+
     /// Log an event if observer is present
     fn log_event(&self, event: EventKind) {
         if let Some(ref observer) = self.observer {
@@ -150,12 +159,22 @@ Guidelines:
     /// Record usage if observer is present
     fn record_usage(&self, usage: &UsageStats) {
         if let Some(ref observer) = self.observer {
-            observer.record_usage(
-                &self.session_id,
-                self.provider.name(),
-                self.provider.model(),
-                usage,
-            );
+            if let Some(ref flow_name) = self.flow_name {
+                observer.record_flow_usage(
+                    flow_name,
+                    &self.session_id,
+                    self.provider.name(),
+                    self.provider.model(),
+                    usage,
+                );
+            } else {
+                observer.record_usage(
+                    &self.session_id,
+                    self.provider.name(),
+                    self.provider.model(),
+                    usage,
+                );
+            }
         }
     }
 

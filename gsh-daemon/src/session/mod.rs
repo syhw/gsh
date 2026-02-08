@@ -309,6 +309,38 @@ fn read_session_metadata(path: &Path) -> Result<SessionMetadata> {
     Ok(metadata)
 }
 
+/// Clean up old sessions based on max count and max age
+pub fn cleanup_sessions(session_dir: &Path, max_sessions: usize, max_age_days: u64) -> Result<usize> {
+    let sessions = list_sessions(session_dir)?;
+    let mut deleted = 0;
+
+    let cutoff = Utc::now() - chrono::Duration::days(max_age_days as i64);
+
+    for (i, session) in sessions.iter().enumerate() {
+        let too_many = i >= max_sessions;
+        let too_old = session.last_activity < cutoff;
+
+        if too_many || too_old {
+            if let Err(e) = delete_session(&session.id, session_dir) {
+                warn!("Failed to clean up session {}: {}", &session.id[..8], e);
+            } else {
+                debug!(
+                    "Cleaned up session {} ({})",
+                    &session.id[..8],
+                    if too_old { "expired" } else { "over limit" }
+                );
+                deleted += 1;
+            }
+        }
+    }
+
+    if deleted > 0 {
+        debug!("Session cleanup: deleted {} session(s)", deleted);
+    }
+
+    Ok(deleted)
+}
+
 /// Delete a session file from disk
 pub fn delete_session(session_id: &str, session_dir: &Path) -> Result<()> {
     let file_path = session_dir.join(format!("{}.jsonl", session_id));

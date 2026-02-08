@@ -50,8 +50,23 @@ enum Commands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Get the PID file path
+fn pid_file_path(config: &config::Config) -> PathBuf {
+    let socket_path = config.socket_path();
+    socket_path.with_extension("pid")
+}
+
+/// Get the default log file path for daemon mode
+fn default_daemon_log() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local")
+        .join("share")
+        .join("gsh")
+        .join("daemon.log")
+}
+
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Load configuration
@@ -61,36 +76,58 @@ async fn main() -> Result<()> {
         config::Config::load()?
     };
 
-    // Setup logging (CLI flag takes precedence over config)
-    let log_level_str = cli.log_level.as_deref().unwrap_or(&config.daemon.log_level);
-    let log_level = log_level_str.parse().unwrap_or(tracing::Level::INFO);
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(log_level)
-        .with_target(false);
-
-    if let Some(log_file) = &config.daemon.log_file {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)
-            .with_context(|| format!("Failed to open log file: {}", log_file.display()))?;
-        subscriber.with_writer(std::sync::Mutex::new(file)).init();
-    } else {
-        subscriber.init();
-    }
-
     match cli.command {
         Commands::Start { foreground } => {
-            if !foreground {
-                info!("Note: Daemonization not implemented, running in foreground");
+            if foreground {
+                // Foreground: setup logging to stderr, then run
+                setup_logging(&config, cli.log_level.as_deref(), false)?;
+                tokio::runtime::Runtime::new()?
+                    .block_on(run_daemon(config))
+            } else {
+                // Daemonize: fork into background, then run
+                let log_file = config.daemon.log_file.clone()
+                    .unwrap_or_else(default_daemon_log);
+
+                // Ensure log directory exists
+                if let Some(parent) = log_file.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+
+                let pid_file = pid_file_path(&config);
+                let stdout_file = std::fs::OpenOptions::new()
+                    .create(true).append(true).open(&log_file)
+                    .with_context(|| format!("Failed to open log file: {}", log_file.display()))?;
+                let stderr_file = std::fs::OpenOptions::new()
+                    .create(true).append(true).open(&log_file)
+                    .with_context(|| format!("Failed to open log file: {}", log_file.display()))?;
+
+                let daemonize = daemonize::Daemonize::new()
+                    .pid_file(&pid_file)
+                    .working_directory(".")
+                    .stdout(stdout_file)
+                    .stderr(stderr_file);
+
+                match daemonize.start() {
+                    Ok(_) => {
+                        // We're in the child process now
+                        setup_logging(&config, cli.log_level.as_deref(), true)?;
+                        tokio::runtime::Runtime::new()?
+                            .block_on(run_daemon(config))
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to daemonize: {}", e);
+                        std::process::exit(1);
+                    }
+                }
             }
-            run_daemon(config).await
         }
         Commands::Stop => {
-            send_shutdown(&config).await
+            tokio::runtime::Runtime::new()?
+                .block_on(send_shutdown(&config))
         }
         Commands::Status => {
-            check_status(&config).await
+            tokio::runtime::Runtime::new()?
+                .block_on(check_status(&config))
         }
         Commands::Dashboard { log_dir } => {
             if let Some(dir) = log_dir {
@@ -102,8 +139,33 @@ async fn main() -> Result<()> {
     }
 }
 
+fn setup_logging(config: &config::Config, log_level_override: Option<&str>, daemon_mode: bool) -> Result<()> {
+    let log_level_str = log_level_override.unwrap_or(&config.daemon.log_level);
+    let log_level = log_level_str.parse().unwrap_or(tracing::Level::INFO);
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(log_level)
+        .with_target(false);
+
+    if daemon_mode {
+        // In daemon mode, log to the daemon log file (stdout/stderr already redirected)
+        subscriber.init();
+    } else if let Some(log_file) = &config.daemon.log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+            .with_context(|| format!("Failed to open log file: {}", log_file.display()))?;
+        subscriber.with_writer(std::sync::Mutex::new(file)).init();
+    } else {
+        subscriber.init();
+    }
+
+    Ok(())
+}
+
 async fn run_daemon(config: config::Config) -> Result<()> {
     let socket_path = config.socket_path();
+    let pid_path = pid_file_path(&config);
 
     // Remove existing socket if present
     if socket_path.exists() {
@@ -116,15 +178,21 @@ async fn run_daemon(config: config::Config) -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
+    // Write PID file (for foreground mode; daemon mode writes it via daemonize)
+    if !pid_path.exists() {
+        let _ = std::fs::write(&pid_path, format!("{}", std::process::id()));
+    }
+
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("Failed to bind to socket: {}", socket_path.display()))?;
 
-    info!("gsh-daemon v{} listening on {}", VERSION, socket_path.display());
+    info!("gsh-daemon v{} (pid {}) listening on {}", VERSION, std::process::id(), socket_path.display());
 
     let state = DaemonState::new(config);
 
     // Handle shutdown signal
     let socket_path_clone = socket_path.clone();
+    let pid_path_clone = pid_path.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         info!("Received shutdown signal");
@@ -134,8 +202,9 @@ async fn run_daemon(config: config::Config) -> Result<()> {
         if !killed_sessions.is_empty() {
             info!("Killed {} tmux session(s): {}", killed_sessions.len(), killed_sessions.join(", "));
         }
-        // Clean up socket
+        // Clean up socket and PID file
         let _ = std::fs::remove_file(&socket_path_clone);
+        let _ = std::fs::remove_file(&pid_path_clone);
         std::process::exit(0);
     });
 
@@ -550,8 +619,15 @@ async fn process_message(
             let response_str = serde_json::to_string(&response)? + "\n";
             writer.write_all(response_str.as_bytes()).await?;
 
-            // Clean up socket
+            // Clean up tmux sessions
+            let killed_sessions = tmux::TmuxManager::cleanup_all_sessions();
+            if !killed_sessions.is_empty() {
+                info!("Killed {} tmux session(s)", killed_sessions.len());
+            }
+
+            // Clean up socket and PID file
             let _ = std::fs::remove_file(state.config.socket_path());
+            let _ = std::fs::remove_file(pid_file_path(&state.config));
 
             std::process::exit(0);
         }
@@ -560,15 +636,36 @@ async fn process_message(
 
 async fn send_shutdown(config: &config::Config) -> Result<()> {
     let socket_path = config.socket_path();
+    let pid_path = pid_file_path(config);
 
     if !socket_path.exists() {
+        // Try PID file as fallback
+        if pid_path.exists() {
+            if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+                if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                    // Send SIGTERM
+                    unsafe { libc::kill(pid, libc::SIGTERM); }
+                    let _ = std::fs::remove_file(&pid_path);
+                    println!("Daemon stopped (via SIGTERM, pid {})", pid);
+                    return Ok(());
+                }
+            }
+            let _ = std::fs::remove_file(&pid_path);
+        }
         println!("Daemon not running (socket not found)");
         return Ok(());
     }
 
-    let stream = UnixStream::connect(&socket_path)
-        .await
-        .context("Failed to connect to daemon")?;
+    let stream = match UnixStream::connect(&socket_path).await {
+        Ok(s) => s,
+        Err(_) => {
+            // Stale socket — clean up
+            let _ = std::fs::remove_file(&socket_path);
+            let _ = std::fs::remove_file(&pid_path);
+            println!("Daemon not running (stale socket removed)");
+            return Ok(());
+        }
+    };
 
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -586,6 +683,7 @@ async fn send_shutdown(config: &config::Config) -> Result<()> {
 
 async fn check_status(config: &config::Config) -> Result<()> {
     let socket_path = config.socket_path();
+    let pid_path = pid_file_path(config);
 
     if !socket_path.exists() {
         println!("Daemon not running");
@@ -595,7 +693,7 @@ async fn check_status(config: &config::Config) -> Result<()> {
     let stream = match UnixStream::connect(&socket_path).await {
         Ok(s) => s,
         Err(_) => {
-            println!("Daemon not running (connection failed)");
+            println!("Daemon not running (stale socket)");
             return Ok(());
         }
     };
@@ -617,6 +715,12 @@ async fn check_status(config: &config::Config) -> Result<()> {
         println!("  Version: {}", version);
         println!("  Uptime: {}s", uptime_secs);
         println!("  Socket: {}", socket_path.display());
+        // Show PID if available
+        if let Ok(pid_str) = std::fs::read_to_string(&pid_path) {
+            if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                println!("  PID: {}", pid);
+            }
+        }
     }
 
     Ok(())

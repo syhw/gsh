@@ -210,6 +210,8 @@ impl AccumulatedUsage {
 pub struct CostTracker {
     /// Usage by session ID
     sessions: HashMap<String, AccumulatedUsage>,
+    /// Usage by flow name
+    flows: HashMap<String, AccumulatedUsage>,
     /// Global accumulated usage
     global: AccumulatedUsage,
 }
@@ -229,9 +231,24 @@ impl CostTracker {
         self.global.add(provider, model, usage);
     }
 
+    /// Record usage for a flow (also records to session and global)
+    pub fn record_flow(&mut self, flow_name: &str, session_id: &str, provider: &str, model: &str, usage: &UsageStats) {
+        // Update flow-specific usage
+        let flow_usage = self.flows.entry(flow_name.to_string()).or_default();
+        flow_usage.add(provider, model, usage);
+
+        // Also record to session and global
+        self.record(session_id, provider, model, usage);
+    }
+
     /// Get usage for a specific session
     pub fn session_usage(&self, session_id: &str) -> Option<&AccumulatedUsage> {
         self.sessions.get(session_id)
+    }
+
+    /// Get usage for a specific flow
+    pub fn flow_usage(&self, flow_name: &str) -> Option<&AccumulatedUsage> {
+        self.flows.get(flow_name)
     }
 
     /// Get global usage
@@ -242,6 +259,11 @@ impl CostTracker {
     /// Get all sessions with their usage
     pub fn all_sessions(&self) -> &HashMap<String, AccumulatedUsage> {
         &self.sessions
+    }
+
+    /// Get all flows with their usage
+    pub fn all_flows(&self) -> &HashMap<String, AccumulatedUsage> {
+        &self.flows
     }
 }
 
@@ -304,6 +326,38 @@ mod tests {
         assert_eq!(tracker.global_usage().request_count, 3);
         assert_eq!(tracker.session_usage("session-1").unwrap().request_count, 2);
         assert_eq!(tracker.session_usage("session-2").unwrap().request_count, 1);
+    }
+
+    #[test]
+    fn test_flow_cost_tracking() {
+        let mut tracker = CostTracker::new();
+
+        let stats = UsageStats {
+            input_tokens: 2000,
+            output_tokens: 1000,
+            total_tokens: 3000,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
+        };
+
+        tracker.record_flow("code-review", "session-1", "anthropic", "claude-sonnet-4", &stats);
+        tracker.record_flow("code-review", "session-1", "anthropic", "claude-sonnet-4", &stats);
+        tracker.record_flow("research", "session-2", "openai", "gpt-4o", &stats);
+
+        // Flow-level tracking
+        let review_usage = tracker.flow_usage("code-review").unwrap();
+        assert_eq!(review_usage.request_count, 2);
+        assert_eq!(review_usage.total_input_tokens, 4000);
+
+        let research_usage = tracker.flow_usage("research").unwrap();
+        assert_eq!(research_usage.request_count, 1);
+
+        assert!(tracker.flow_usage("nonexistent").is_none());
+
+        // Also recorded at session and global level
+        assert_eq!(tracker.global_usage().request_count, 3);
+        assert_eq!(tracker.session_usage("session-1").unwrap().request_count, 2);
+        assert_eq!(tracker.all_flows().len(), 2);
     }
 
     #[test]

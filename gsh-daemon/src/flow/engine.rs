@@ -326,10 +326,13 @@ impl FlowEngine {
         ctx: Arc<RwLock<FlowContext>>,
         event_tx: &mpsc::Sender<FlowEvent>,
     ) -> Result<String> {
-        
-
         let node = flow.get_node(node_id)
             .ok_or_else(|| anyhow::anyhow!("Node not found: {}", node_id))?;
+
+        // If count > 1, spawn multiple instances of this node
+        if node.count > 1 {
+            return self.execute_node_instances(flow, node_id, ctx, event_tx).await;
+        }
 
         info!("Executing node: {} ({})", node_id, node.name);
 
@@ -424,7 +427,7 @@ impl FlowEngine {
             provider,
             &self.config,
             ctx.read().await.cwd.clone(),
-        );
+        ).with_flow_name(&flow.name);
 
         // Add publication tools if in publication mode
         if let Some(ref store) = self.publication_store {
@@ -541,6 +544,351 @@ impl FlowEngine {
         }
     }
 
+    /// Execute multiple instances of the same node (when count > 1)
+    async fn execute_node_instances(
+        &self,
+        flow: &Flow,
+        node_id: &str,
+        ctx: Arc<RwLock<FlowContext>>,
+        event_tx: &mpsc::Sender<FlowEvent>,
+    ) -> Result<String> {
+        let node = flow.get_node(node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node not found: {}", node_id))?;
+
+        let count = node.count;
+        let run_parallel = node.parallel;
+
+        info!(
+            "Executing node '{}' ({}) with {} instance(s) ({})",
+            node_id, node.name, count,
+            if run_parallel { "parallel" } else { "sequential" }
+        );
+
+        // Resolve shared settings for all instances
+        let role = self.resolve_role(node)?;
+        let provider_name = node.provider.clone()
+            .or_else(|| role.as_ref().and_then(|r| r.provider.clone()))
+            .or_else(|| self.provider_overrides.get(node_id).cloned())
+            .unwrap_or_else(|| self.config.llm.default_provider.clone());
+        let model_override = node.model.clone()
+            .or_else(|| role.as_ref().and_then(|r| r.model.clone()))
+            .or_else(|| self.model_overrides.get(node_id).cloned());
+
+        // Build the base prompt
+        let base_prompt = ctx.read().await.build_prompt(node_id);
+        let prompt = if let Some(ref role) = role {
+            if let Some(ref system) = role.system_prompt {
+                format!("{}\n\n---\n\n{}", system, base_prompt)
+            } else if let Some(ref sp) = node.system_prompt {
+                format!("{}\n\n---\n\n{}", sp, base_prompt)
+            } else {
+                base_prompt
+            }
+        } else if let Some(ref sp) = node.system_prompt {
+            format!("{}\n\n---\n\n{}", sp, base_prompt)
+        } else {
+            base_prompt
+        };
+
+        // In publication mode, inject publications from review_from nodes
+        let prompt = if let Some(ref store) = self.publication_store {
+            if !node.review_from.is_empty() {
+                let mut review_pubs = Vec::new();
+                for from_node in &node.review_from {
+                    review_pubs.extend(store.by_node(from_node).await);
+                }
+                if !review_pubs.is_empty() {
+                    let pub_context = store.format_for_context(&review_pubs).await;
+                    format!(
+                        "{}\n\n--- Publications to review (from: {}) ---\n{}",
+                        prompt,
+                        node.review_from.join(", "),
+                        pub_context,
+                    )
+                } else {
+                    prompt
+                }
+            } else {
+                prompt
+            }
+        } else {
+            prompt
+        };
+
+        // Capture publication snapshot before instances run
+        let pub_snapshot = self.capture_pub_snapshot().await;
+
+        let cwd = ctx.read().await.cwd.clone();
+
+        if run_parallel {
+            // Spawn all instances concurrently
+            let mut handles = Vec::new();
+
+            for i in 0..count {
+                let instance_id = format!("{}-{}", node_id, i + 1);
+                let config_clone = self.config.clone();
+                let provider_name_clone = provider_name.clone();
+                let model_override_clone = model_override.clone();
+                let prompt_clone = prompt.clone();
+                let cwd_clone = cwd.clone();
+                let event_tx_clone = event_tx.clone();
+                let publication_store = self.publication_store.clone();
+                let node_id_str = node_id.to_string();
+                let node_name = node.name.clone();
+                let flow_name_clone = flow.name.clone();
+
+                let handle = tokio::spawn(async move {
+                    let _ = event_tx_clone.send(FlowEvent::NodeStarted {
+                        node_id: instance_id.clone(),
+                        node_name: format!("{} #{}", node_name, i + 1),
+                        agent_type: "instance".to_string(),
+                        tmux_session: None,
+                    }).await;
+
+                    let provider = if let Some(ref model) = model_override_clone {
+                        provider::create_provider_with_model(&provider_name_clone, model, &config_clone)?
+                    } else {
+                        provider::create_provider(&provider_name_clone, &config_clone)?
+                    };
+
+                    let mut agent = Agent::new(provider, &config_clone, cwd_clone)
+                        .with_flow_name(&flow_name_clone);
+
+                    // Add publication tools if in publication mode
+                    if let Some(ref store) = publication_store {
+                        let agent_id = format!("{}-{}", instance_id,
+                            uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+                        let handler = PublicationToolHandler::new(
+                            store.clone(),
+                            agent_id,
+                            node_id_str.clone(),
+                        );
+                        agent = agent.with_custom_handler(Arc::new(handler));
+                    }
+
+                    let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
+
+                    let agent_handle = tokio::spawn(async move {
+                        agent.run_oneshot(&prompt_clone, None, agent_event_tx).await
+                    });
+
+                    let mut output = String::new();
+                    while let Some(event) = agent_event_rx.recv().await {
+                        match event {
+                            AgentEvent::TextChunk(text) => {
+                                output.push_str(&text);
+                                let _ = event_tx_clone.send(FlowEvent::NodeText {
+                                    node_id: instance_id.clone(),
+                                    text,
+                                }).await;
+                            }
+                            AgentEvent::ToolStart { name, input } => {
+                                let _ = event_tx_clone.send(FlowEvent::NodeToolUse {
+                                    node_id: instance_id.clone(),
+                                    tool: name,
+                                    input,
+                                }).await;
+                            }
+                            AgentEvent::ToolResult { name, output, success } => {
+                                let _ = event_tx_clone.send(FlowEvent::NodeToolResult {
+                                    node_id: instance_id.clone(),
+                                    tool: name,
+                                    output,
+                                    success,
+                                }).await;
+                            }
+                            AgentEvent::Done { final_text } => {
+                                output = final_text;
+                            }
+                            AgentEvent::Error(e) => {
+                                let _ = event_tx_clone.send(FlowEvent::FlowError {
+                                    node_id: Some(instance_id.clone()),
+                                    error: e.clone(),
+                                }).await;
+                                return Err(anyhow::anyhow!("Agent error in {}: {}", instance_id, e));
+                            }
+                        }
+                    }
+
+                    agent_handle.await??;
+                    Ok::<(String, String), anyhow::Error>((instance_id, output))
+                });
+
+                handles.push(handle);
+            }
+
+            // Collect results from all parallel instances
+            let mut combined_output = String::new();
+            for handle in handles {
+                let (instance_id, output) = handle.await??;
+                if !combined_output.is_empty() {
+                    combined_output.push_str("\n\n---\n\n");
+                }
+                combined_output.push_str(&format!("[{}]:\n{}", instance_id, output));
+            }
+
+            // Store combined output in context
+            {
+                let mut ctx_write = ctx.write().await;
+                ctx_write.node_outputs.insert(node_id.to_string(), combined_output.clone());
+            }
+
+            // Emit publication events
+            if let Some(ref pre) = pub_snapshot {
+                self.emit_pub_events(node_id, pre, event_tx).await;
+            }
+
+            // Determine and execute next node
+            let next_node_id = self.determine_next(&node.next, &combined_output, &ctx).await?;
+            let _ = event_tx.send(FlowEvent::NodeCompleted {
+                node_id: node_id.to_string(),
+                output: combined_output.clone(),
+                next_node: next_node_id.clone(),
+            }).await;
+
+            match &node.next {
+                NextNode::End => Ok(combined_output),
+                NextNode::Single(next_id) => {
+                    self.execute_node(flow, next_id, ctx, event_tx).await
+                }
+                NextNode::Conditional { .. } => {
+                    if let Some(next_id) = next_node_id {
+                        self.execute_node(flow, &next_id, ctx, event_tx).await
+                    } else {
+                        Ok(combined_output)
+                    }
+                }
+                NextNode::Parallel { nodes, join } => {
+                    self.execute_parallel(flow, nodes, join, ctx, event_tx).await
+                }
+            }
+        } else {
+            // Sequential execution of instances
+            let mut combined_output = String::new();
+
+            for i in 0..count {
+                let instance_id = format!("{}-{}", node_id, i + 1);
+
+                let _ = event_tx.send(FlowEvent::NodeStarted {
+                    node_id: instance_id.clone(),
+                    node_name: format!("{} #{}", node.name, i + 1),
+                    agent_type: "instance".to_string(),
+                    tmux_session: None,
+                }).await;
+
+                let provider = if let Some(ref model) = model_override {
+                    provider::create_provider_with_model(&provider_name, model, &self.config)?
+                } else {
+                    provider::create_provider(&provider_name, &self.config)?
+                };
+
+                let mut agent = Agent::new(provider, &self.config, cwd.clone())
+                    .with_flow_name(&flow.name);
+
+                if let Some(ref store) = self.publication_store {
+                    let agent_id = format!("{}-{}", instance_id,
+                        uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
+                    let handler = PublicationToolHandler::new(
+                        store.clone(),
+                        agent_id,
+                        node_id.to_string(),
+                    );
+                    agent = agent.with_custom_handler(Arc::new(handler));
+                }
+
+                let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
+                let event_tx_clone = event_tx.clone();
+                let instance_id_clone = instance_id.clone();
+                let prompt_clone = prompt.clone();
+
+                let agent_handle = tokio::spawn(async move {
+                    agent.run_oneshot(&prompt_clone, None, agent_event_tx).await
+                });
+
+                let mut output = String::new();
+                while let Some(event) = agent_event_rx.recv().await {
+                    match event {
+                        AgentEvent::TextChunk(text) => {
+                            output.push_str(&text);
+                            let _ = event_tx_clone.send(FlowEvent::NodeText {
+                                node_id: instance_id_clone.clone(),
+                                text,
+                            }).await;
+                        }
+                        AgentEvent::ToolStart { name, input } => {
+                            let _ = event_tx_clone.send(FlowEvent::NodeToolUse {
+                                node_id: instance_id_clone.clone(),
+                                tool: name,
+                                input,
+                            }).await;
+                        }
+                        AgentEvent::ToolResult { name, output, success } => {
+                            let _ = event_tx_clone.send(FlowEvent::NodeToolResult {
+                                node_id: instance_id_clone.clone(),
+                                tool: name,
+                                output,
+                                success,
+                            }).await;
+                        }
+                        AgentEvent::Done { final_text } => {
+                            output = final_text;
+                        }
+                        AgentEvent::Error(e) => {
+                            let _ = event_tx_clone.send(FlowEvent::FlowError {
+                                node_id: Some(instance_id_clone.clone()),
+                                error: e.clone(),
+                            }).await;
+                            return Err(anyhow::anyhow!("Agent error in {}: {}", instance_id, e));
+                        }
+                    }
+                }
+
+                agent_handle.await??;
+
+                if !combined_output.is_empty() {
+                    combined_output.push_str("\n\n---\n\n");
+                }
+                combined_output.push_str(&format!("[{}]:\n{}", instance_id, output));
+            }
+
+            // Store combined output in context
+            {
+                let mut ctx_write = ctx.write().await;
+                ctx_write.node_outputs.insert(node_id.to_string(), combined_output.clone());
+            }
+
+            // Emit publication events
+            if let Some(ref pre) = pub_snapshot {
+                self.emit_pub_events(node_id, pre, event_tx).await;
+            }
+
+            // Determine and execute next node
+            let next_node_id = self.determine_next(&node.next, &combined_output, &ctx).await?;
+            let _ = event_tx.send(FlowEvent::NodeCompleted {
+                node_id: node_id.to_string(),
+                output: combined_output.clone(),
+                next_node: next_node_id.clone(),
+            }).await;
+
+            match &node.next {
+                NextNode::End => Ok(combined_output),
+                NextNode::Single(next_id) => {
+                    self.execute_node(flow, next_id, ctx, event_tx).await
+                }
+                NextNode::Conditional { .. } => {
+                    if let Some(next_id) = next_node_id {
+                        self.execute_node(flow, &next_id, ctx, event_tx).await
+                    } else {
+                        Ok(combined_output)
+                    }
+                }
+                NextNode::Parallel { nodes, join } => {
+                    self.execute_parallel(flow, nodes, join, ctx, event_tx).await
+                }
+            }
+        }
+    }
+
     /// Execute multiple nodes in parallel
     async fn execute_parallel(
         &self,
@@ -591,7 +939,8 @@ impl FlowEngine {
                     .unwrap_or_else(|| sub_engine.config.llm.default_provider.clone());
 
                 let provider = provider::create_provider(&provider_name, &sub_engine.config)?;
-                let mut agent = Agent::new(provider, &sub_engine.config, cwd);
+                let mut agent = Agent::new(provider, &sub_engine.config, cwd)
+                    .with_flow_name(&flow_clone.name);
 
                 // Add publication tools if in publication mode
                 if let Some(ref store) = sub_engine.publication_store {

@@ -283,7 +283,7 @@ gsh-start() {
     fi
 
     echo "Starting gsh daemon..."
-    "$GSH_DAEMON_BIN" start --foreground &!
+    "$GSH_DAEMON_BIN" start
 
     # Wait for socket to appear
     local i=0
@@ -295,7 +295,7 @@ gsh-start() {
     if [[ -S "$GSH_SOCKET" ]]; then
         echo "gsh daemon started (socket: $GSH_SOCKET)"
     else
-        echo "Warning: Daemon may have failed to start"
+        echo "Warning: Daemon may have failed to start (check ~/.local/share/gsh/daemon.log)"
     fi
 }
 

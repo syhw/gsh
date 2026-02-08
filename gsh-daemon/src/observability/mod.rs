@@ -117,6 +117,21 @@ impl Observer {
         }
 
         // Also log as an event
+        self.log_usage_event(session, provider, model, usage);
+    }
+
+    /// Record token usage for a flow (aggregates under flow name and session)
+    pub fn record_flow_usage(&self, flow_name: &str, session: &str, provider: &str, model: &str, usage: &UsageStats) {
+        {
+            let mut tracker = self.cost_tracker.write().unwrap();
+            tracker.record_flow(flow_name, session, provider, model, usage);
+        }
+
+        self.log_usage_event(session, provider, model, usage);
+    }
+
+    /// Log a usage event
+    fn log_usage_event(&self, session: &str, provider: &str, model: &str, usage: &UsageStats) {
         let cost = get_model_pricing(provider, model)
             .map(|p| p.calculate(usage.input_tokens, usage.output_tokens, usage.cache_read_tokens));
 
@@ -139,6 +154,18 @@ impl Observer {
     pub fn session_usage(&self, session: &str) -> Option<AccumulatedUsage> {
         let tracker = self.cost_tracker.read().unwrap();
         tracker.session_usage(session).cloned()
+    }
+
+    /// Get accumulated usage for a flow
+    pub fn flow_usage(&self, flow_name: &str) -> Option<AccumulatedUsage> {
+        let tracker = self.cost_tracker.read().unwrap();
+        tracker.flow_usage(flow_name).cloned()
+    }
+
+    /// Get all flows with their usage
+    pub fn all_flow_usage(&self) -> std::collections::HashMap<String, AccumulatedUsage> {
+        let tracker = self.cost_tracker.read().unwrap();
+        tracker.all_flows().clone()
     }
 
     /// Get global accumulated usage
