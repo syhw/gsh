@@ -1,17 +1,46 @@
 # gsh - Agentic Shell
 
-An AI-powered shell assistant that understands your terminal context. gsh captures your shell activity (commands, outputs, directory changes) and uses it to provide contextual help via LLM. Supports multi-agent flows with tmux-based isolation.
+An AI-powered shell assistant built on a simple idea: **log everything, build context automatically, let the LLM figure it out**.
+
+gsh runs a background daemon that silently captures your shell activity — every command you run, every exit code, every directory change, with timestamps and durations. When you ask a question, all of that context is injected into the LLM prompt automatically. You don't have to explain what you were doing or paste error output. The LLM already knows.
+
+## How It Works
+
+```
+ You type commands normally          gsh daemon silently records everything
+ ──────────────────────────          ────────────────────────────────────────
+ $ cd ~/project                  →   [14:02:01] cd: ~ -> ~/project
+ $ cargo build                   →   [14:02:03] ~/project $ cargo build -> exit 1 (2340ms)
+ $ cat src/main.rs               →   [14:02:08] ~/project $ cat src/main.rs -> OK (12ms)
+
+ Then you ask:
+ $ gsh why did my build fail
+
+ The LLM sees your full shell history as context — it knows you're in ~/project,
+ that cargo build failed with exit 1, and what you looked at after. No copy-paste needed.
+```
+
+The context accumulator is a circular buffer of shell events. It captures:
+
+- **Commands**: what was run, where, exit code, duration in ms
+- **Directory changes**: from/to paths with timestamps
+- **Timing**: when things happened, how long they took
+
+This context is formatted and injected into the system prompt on every LLM call. The LLM sees a chronological log of your recent shell activity and can reason about it.
 
 ## Features
 
-- **Context-aware**: Knows your recent commands, working directory, and shell history
-- **Tool use**: Can read/write files, run commands, search with glob/grep
+- **Automatic context**: Shell hooks capture commands, exit codes, directory changes, durations
+- **Configurable context window**: Control how many events and how many characters of context the LLM sees
+- **Session persistence**: Every interaction is saved to disk and can be resumed after daemon restarts or reboots
+- **Tool use**: The agent can read/write files, run commands, search with glob/grep
+- **Environment detection**: Detects your active Python env (conda, micromamba, venv, pyenv) and tells the LLM to use it
 - **Streaming**: Real-time response streaming
 - **Multiple providers**: Anthropic Claude, OpenAI, Zhipu GLM-4, Together.AI (Kimi K2), Ollama
-- **Flow orchestration**: Define multi-agent workflows in TOML with sequential, conditional, and parallel execution
-- **Tmux integration**: Subagents run in attachable tmux sessions for debugging
-- **Observability**: JSONL logging and TUI dashboard for monitoring
-- **No quotes needed**: `llm what files are here` just works
+- **Flow orchestration**: Define multi-agent workflows in TOML
+- **Tmux integration**: Subagents run in attachable tmux sessions
+- **Observability**: JSONL logging of all events, TUI dashboard for monitoring
+- **No quotes needed**: `gsh what files are here` just works
 
 ## Installation
 
@@ -26,11 +55,9 @@ An AI-powered shell assistant that understands your terminal context. gsh captur
 ```bash
 git clone <repo-url> gsh
 cd gsh
-
-# Build release binaries
 cargo build --release
 
-# Optional: Install to PATH
+# Optional: install to PATH
 cargo install --path gsh-daemon
 cargo install --path gsh-cli
 ```
@@ -45,367 +72,320 @@ cargo install --path gsh-cli
 
 2. **Add to your `.zshrc`**:
    ```bash
-   # Source the plugin (adjust path as needed)
    source /path/to/gsh/gsh.plugin.zsh
-
-   # Or if installed to PATH, just set the bins:
-   # export GSH_DAEMON_BIN="gsh-daemon"
-   # export GSH_CLI_BIN="gsh"
-   # source /path/to/gsh/gsh.plugin.zsh
    ```
 
-3. **Set your API key** (choose one):
+3. **Set your API key** (at least one):
    ```bash
-   # Anthropic (Claude)
    export ANTHROPIC_API_KEY="sk-ant-..."
-
-   # OpenAI
+   # or
    export OPENAI_API_KEY="sk-..."
    ```
 
+4. **Start the daemon**:
+   ```bash
+   gsh-daemon start --foreground   # or: gsh-start
+   ```
+
+## Context System (the core idea)
+
+### What gets captured
+
+The zsh plugin registers three hooks that fire automatically:
+
+| Hook | Trigger | What it sends |
+|------|---------|---------------|
+| `preexec` | Before every command | Command text, cwd, timestamp |
+| `precmd` | After every command | Exit code, cwd, duration in ms |
+| `chpwd` | On directory change | Old path, new path, timestamp |
+
+These are sent to the daemon over a Unix socket as fire-and-forget JSON messages. The daemon stores them in a circular buffer (the **context accumulator**).
+
+### What the LLM sees
+
+When you run `gsh <prompt>`, the daemon formats the accumulated events into a context block that gets prepended to the system prompt:
+
+```
+# Recent Shell Activity
+
+[14:02:01] cd: ~ -> ~/project
+
+[14:02:03] ~/project $ cargo build
+  -> exit 1 (2340ms)
+
+[14:02:08] ~/project $ cat src/main.rs
+  -> OK (12ms)
+
+[14:02:15] ~/project $ git diff
+  -> OK (45ms)
+```
+
+The LLM can see exactly what you did, what failed, how long things took, and where you are. When you ask "why did my build fail?", it has all the context it needs.
+
+### Configuring context
+
+In `~/.config/gsh/config.toml`:
+
+```toml
+[context]
+# How many shell events to keep in the circular buffer.
+# More events = more history the LLM can see, but more tokens used.
+max_events = 100
+
+# Maximum characters of formatted context to inject into the system prompt.
+# If the full history exceeds this, older events are dropped.
+# Increase for complex debugging sessions, decrease to save tokens.
+max_context_chars = 50000
+
+# Include command outputs in context (when captured).
+include_outputs = true
+```
+
+### Controlling context tracking
+
+```bash
+gsh-disable         # Stop sending shell events to daemon
+gsh-enable          # Resume sending shell events
+
+# Or set in your environment:
+export GSH_ENABLED=0   # Disable for this shell session
+```
+
+This is useful when running sensitive commands you don't want logged, or when you want a "clean" context for a specific task.
+
 ## Usage
 
-### Start the daemon
-
 ```bash
-# In a terminal (or add to your shell startup)
-gsh-daemon start --foreground
+# Ask anything — your shell context is included automatically
+gsh what files are in this directory
+gsh explain the error in my last command
+gsh why is this test failing
 
-# Or use the helper function after sourcing the plugin
-gsh-start
-```
-
-### Send prompts
-
-```bash
-# No quotes needed - all arguments are joined
-llm what files are in this directory
-llm explain the error in my last command
-llm write a python script that parses json
-
-# Read from stdin
-echo "explain this" | llm
-cat error.log | llm what went wrong
+# Pipe content in
+cat error.log | gsh what went wrong
+git diff | gsh review these changes
 
 # Read from file
-llm - < prompt.txt
-
-# Interactive chat
-llm chat
+gsh - < prompt.txt
 ```
 
-### Other commands
+### Sessions
+
+Every `gsh` call creates a persisted session (JSONL file in `~/.local/share/gsh/sessions/`). Sessions survive daemon restarts and reboots.
 
 ```bash
-llm status          # Check daemon status
-llm stop            # Stop the daemon
-gsh-restart         # Restart the daemon
-gsh-disable         # Disable context tracking
-gsh-enable          # Re-enable context tracking
+# List saved sessions
+gsh sessions
+
+# Resume a session (full conversation history is sent to the LLM)
+gsh chat --session a1b2c3d4
 ```
+
+`gsh chat` starts an interactive REPL — a multi-turn conversation where context accumulates across messages within the same connection. Use it when you need a back-and-forth dialogue:
+
+```bash
+gsh chat                         # New interactive session
+gsh chat --session a1b2c3d4      # Resume an existing one
+```
+
+> **Note**: `gsh chat` exists for the interactive REPL experience. One-shot `gsh <prompt>` calls also persist sessions — the only difference is that `chat` keeps the connection open for multiple turns.
 
 ### Provider and model selection
 
 ```bash
-# Use specific provider
-llm --provider openai "explain this code"
-llm --provider anthropic "write a test"
-
-# Use specific model
-llm --model gpt-4o "complex task"
-llm --model claude-sonnet-4-20250514 "review code"
-
-# Combine both
-llm --provider zhipu --model glm-4 "translate to Chinese"
+gsh -p openai explain this code
+gsh -m gpt-4o review my last commit
+gsh -p together -m moonshotai/Kimi-K2.5 what files are here
 ```
 
-### Flows (multi-agent orchestration)
+### Session management
 
 ```bash
-# Run a predefined flow
-llm --flow code-review "Review my recent changes"
-llm --flow debug "Fix the failing tests"
-
-# List available flows
-ls ~/.config/gsh/flows/
+gsh sessions                     # List saved sessions
+gsh sessions -n 50               # Show more
+gsh sessions --delete a1b2c3d4   # Delete a session
 ```
 
 ### Subagent management
 
 ```bash
-llm agents           # List running subagents
-llm attach <id>      # Attach to subagent's tmux session
-llm kill <id>        # Stop a subagent
+gsh agents           # List running subagents
+gsh attach <id>      # Attach to subagent's tmux session
+gsh logs <id>        # View output
+gsh logs <id> -f     # Follow live output
+gsh kill <id>        # Stop a subagent
 ```
 
-### Observability dashboard
+### Daemon management
 
 ```bash
-gsh-daemon dashboard  # Open TUI dashboard
+gsh-daemon start --foreground   # Start (or: gsh-start)
+gsh status                      # Check status
+gsh stop                        # Stop daemon
+gsh-restart                     # Restart
 ```
 
-The TUI dashboard has three tabs (switch with `1`/`2`/`3`):
+## Python Environment Detection
 
-- **Tab 1 - Events**: Live feed of all agent events (prompts, tool calls, results, errors). Auto-scrolls to latest. Use arrow keys to scroll manually, `a` to toggle auto-scroll.
-- **Tab 2 - Usage**: Token usage breakdown by provider and model. Shows input/output/cache tokens, estimated cost in USD, and per-model breakdown.
-- **Tab 3 - Files**: Available JSONL log files. Select with arrow keys and Enter to load a different session.
+gsh detects your active Python environment and tells the LLM to use it. The CLI reads `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, and `VIRTUAL_ENV` from your shell and sends them to the daemon.
+
+Detection priority:
+1. Active conda/micromamba/venv from your terminal (highest priority)
+2. Project `.venv` or `venv` in the current directory
+3. gsh-managed venv at `~/.local/share/gsh/python-env`
+4. Installed conda/miniconda/miniforge/micromamba/pyenv in home directory
+
+The daemon logs which environment is being used:
+```
+INFO Python env: conda/micromamba 'myenv' at /Users/you/micromamba/envs/myenv
+INFO   activate: micromamba activate myenv (or conda activate myenv)
+```
+
+If no environment is found, the LLM will create one at `~/.local/share/gsh/python-env` when Python is needed.
+
+## Observability Dashboard
+
+```bash
+gsh-daemon dashboard
+```
+
+Three tabs (switch with `1`/`2`/`3`):
+
+- **Events**: Live feed of all agent events (prompts, tool calls, results, errors). Arrow keys to scroll, `a` for auto-scroll.
+- **Usage**: Token usage by provider/model with cost estimates.
+- **Files**: JSONL log files. Select and Enter to load a different session.
 
 Press `q` to quit.
 
-## Defining Flows
+## Flows (Multi-Agent Orchestration)
 
-Flows are TOML files that define multi-agent workflows. Place them in `~/.config/gsh/flows/`.
+Flows define multi-agent workflows in TOML. Place them in `~/.config/gsh/flows/`.
 
-### Example: Simple sequential flow
-
-```toml
-# ~/.config/gsh/flows/code-review.toml
-[flow]
-name = "code-review"
-description = "Review code changes"
-entry = "analyzer"
-
-[nodes.analyzer]
-name = "Code Analyzer"
-prompt = "Analyze the code and identify issues"
-tools = ["read", "glob", "grep"]
-next = "reviewer"
-
-[nodes.reviewer]
-name = "Reviewer"
-prompt = "Review the analysis and provide recommendations"
-tools = ["read"]
-next = "end"
+```bash
+gsh -f code-review "Review my recent changes"
+gsh -f research-consensus "Find security issues in the codebase"
 ```
 
-### Example: Parallel execution
-
-```toml
-[flow]
-name = "multi-review"
-entry = "start"
-
-[nodes.start]
-name = "Dispatcher"
-prompt = "Identify files to review"
-tools = ["glob"]
-next = { parallel = ["security", "style"] }
-
-[nodes.security]
-name = "Security Review"
-prompt = "Check for security vulnerabilities"
-tools = ["read", "grep"]
-
-[nodes.style]
-name = "Style Review"
-prompt = "Check code style and best practices"
-tools = ["read", "grep"]
-
-[nodes.aggregator]
-name = "Summary"
-prompt = "Combine all review findings"
-join_from = ["security", "style"]
-next = "end"
-```
-
-### Example: Publication/review coordination flow
-
-Nodes can coordinate via a shared publication store where agents publish findings and review each other's work. Consensus is reached when a publication receives enough approvals.
+### Example: Publication/review consensus
 
 ```toml
 # ~/.config/gsh/flows/peer-review.toml
 [flow]
 name = "peer-review"
-description = "Multiple agents review code independently and reach consensus"
-entry = "analyst-a"
+description = "Agents publish findings and review each other's work"
+entry = "researchers"
 
-[flow.coordination]
+[coordination]
 mode = "publication"
 consensus_threshold = 2     # Reviews needed for consensus
-allow_self_review = false   # Agents cannot review their own publications
+allow_self_review = false
 
-[nodes.analyst-a]
-name = "Analyst A"
-prompt = "Analyze the code for bugs and publish your findings"
-tools = ["read", "glob", "grep", "publish", "search_publications", "review_publication"]
-next = "analyst-b"
+[nodes.researchers]
+name = "Research Team"
+publication_tags = ["finding"]
+max_iterations = 20
+next = "reviewers"
+system_prompt = "Analyze the code and publish findings using the publish tool."
 
-[nodes.analyst-b]
-name = "Analyst B"
-prompt = "Analyze the code independently, then review Analyst A's publications"
-tools = ["read", "glob", "grep", "publish", "search_publications", "review_publication"]
-review_from = ["analyst-a"]   # Inject Analyst A's publications for review
-next = "aggregator"
+[nodes.reviewers]
+name = "Review Team"
+max_iterations = 15
+next = "synthesizer"
+system_prompt = "Use list_publications to see findings, then review each with ACCEPT/REJECT."
 
-[nodes.aggregator]
-name = "Aggregator"
-prompt = "Summarize all findings that reached consensus"
-tools = ["search_publications"]
+[nodes.synthesizer]
+name = "Synthesizer"
+max_iterations = 10
 next = "end"
+system_prompt = "Summarize all findings that reached consensus."
 ```
 
-Publication tools available to agents in coordination mode:
-- `publish` - Publish a finding with title, content, and tags
-- `search_publications` - Search publications by tag or keyword
-- `review_publication` - Review a publication with approve/reject and comments
+Publication tools available in coordination mode:
+- `publish` — Share a finding with title, content, and tags
+- `search_publications` — Search by tag or keyword
+- `review_publication` — Grade with STRONG_ACCEPT / ACCEPT / NEUTRAL / REJECT / STRONG_REJECT
+
+See `examples/flows/` for complete working examples.
 
 ## Using with OpenAI-Compatible APIs
 
 gsh works with any OpenAI-compatible API (Ollama, vLLM, LM Studio, LocalAI, etc.).
 
-### Example: Local LLM with Ollama
-
-1. **Start Ollama** with your model:
-   ```bash
-   ollama run llama3.1
-   ```
-
-2. **Configure gsh** (`~/.config/gsh/config.toml`):
-   ```toml
-   [llm]
-   default_provider = "openai"
-
-   [llm.openai]
-   api_key = "ollama"  # Ollama doesn't need a real key
-   model = "llama3.1"
-   base_url = "http://localhost:11434/v1/chat/completions"
-   ```
-
-3. **Test it**:
-   ```bash
-   gsh-restart
-   llm hello world
-   ```
-
-### Example: vLLM or other OpenAI-compatible server
+### Ollama (local models)
 
 ```toml
 [llm]
 default_provider = "openai"
 
 [llm.openai]
-api_key = "your-api-key"  # Or "none" if not required
+api_key = "ollama"
+model = "llama3.1"
+base_url = "http://localhost:11434/v1/chat/completions"
+```
+
+### vLLM / LocalAI
+
+```toml
+[llm]
+default_provider = "openai"
+
+[llm.openai]
+api_key = "none"
 model = "meta-llama/Llama-3.1-8B-Instruct"
 base_url = "http://localhost:8000/v1/chat/completions"
 ```
 
-### Example: Azure OpenAI
-
-```toml
-[llm]
-default_provider = "openai"
-
-[llm.openai]
-api_key = "your-azure-api-key"
-model = "gpt-4o"
-base_url = "https://your-resource.openai.azure.com/openai/deployments/your-deployment/chat/completions?api-version=2024-02-15-preview"
-```
-
-### Example: Zhipu GLM-4 (Chinese language optimized)
-
-```toml
-[llm]
-default_provider = "zhipu"
-
-[llm.zhipu]
-api_key = "your-zhipu-api-key"  # Or use ZAI_API_KEY env var
-model = "glm-4"
-```
-
-### Example: Together.AI (Kimi K2, Qwen)
+### Together.AI
 
 ```toml
 [llm]
 default_provider = "together"
 
 [llm.together]
-api_key = "your-together-api-key"  # Or use TOGETHER_API_KEY env var
 model = "Qwen/Qwen3-Coder-235B-A22B-Instruct-FP8"
-```
-
-## Testing Your Setup
-
-### 1. Check daemon is running
-
-```bash
-llm status
-# Should show: Daemon running, Version, Uptime, Socket path
-```
-
-### 2. Test basic prompt
-
-```bash
-llm say hello
-# Should get a response from the LLM
-```
-
-### 3. Test tool use
-
-```bash
-llm list the files in the current directory using the bash tool
-# Should see [Using tool: bash] and file listing
-```
-
-### 4. Test context awareness
-
-```bash
-# Run some commands first
-ls -la
-pwd
-git status
-
-# Then ask about them
-llm what commands did I just run
-# Should reference your recent commands
-```
-
-### 5. Test streaming
-
-```bash
-llm write a long poem about programming
-# Should see text appear word-by-word
+# api_key via TOGETHER_API_KEY env var
 ```
 
 ## Configuration Reference
 
-Full config file (`~/.config/gsh/config.toml`):
+Full config: `~/.config/gsh/config.toml`
 
 ```toml
 [daemon]
-# socket_path = "/tmp/gsh.sock"  # Default: /tmp/gsh-$USER.sock
-log_level = "info"               # trace, debug, info, warn, error
+log_level = "info"                   # trace, debug, info, warn, error
+# socket_path = "/tmp/gsh.sock"     # Default: /tmp/gsh-$USER.sock
 # log_file = "~/.local/share/gsh/daemon.log"
 
 [llm]
-default_provider = "anthropic"   # anthropic, openai
+default_provider = "anthropic"       # anthropic, openai, zhipu, together, ollama
 max_tokens = 4096
 # system_prompt = "Custom system prompt..."
 
 [llm.anthropic]
-# api_key = "sk-ant-..."         # Or use ANTHROPIC_API_KEY env var
 model = "claude-sonnet-4-20250514"
+# api_key = "..."                    # Or ANTHROPIC_API_KEY env var
 
 [llm.openai]
-# api_key = "sk-..."             # Or use OPENAI_API_KEY env var
 model = "gpt-4o"
-# base_url = "https://api.openai.com/v1/chat/completions"
+# api_key = "..."                    # Or OPENAI_API_KEY env var
+# base_url = "..."                   # For compatible APIs
 
 [llm.zhipu]
-# api_key = "..."                # Or use ZAI_API_KEY env var
 model = "glm-4"
+# api_key = "..."                    # Or ZAI_API_KEY env var
 
 [llm.together]
-# api_key = "..."                # Or use TOGETHER_API_KEY env var
-model = "Qwen/Qwen3-Coder-235B-A22B-Instruct-FP8"
+model = "moonshotai/Kimi-K2.5"
+# api_key = "..."                    # Or TOGETHER_API_KEY env var
 
 [llm.ollama]
 model = "llama3.2"
-base_url = "http://localhost:11434"
+# base_url = "http://localhost:11434"
 
 [context]
-max_events = 100                 # Shell events to keep
-max_context_chars = 50000        # Max context length
-include_outputs = true
+max_events = 100                     # Shell events to keep in buffer
+max_context_chars = 50000            # Max context injected into prompt
+include_outputs = true               # Include command outputs
 
 [tools]
 bash_enabled = true
@@ -415,41 +395,33 @@ edit_enabled = true
 glob_enabled = true
 grep_enabled = true
 excluded_paths = [".git/objects", "node_modules", ".venv"]
-max_file_size = 1048576          # 1MB
+max_file_size = 1048576              # 1MB
 
-[observability]
-enabled = true
-log_dir = "~/.local/share/gsh/logs"  # JSONL logs location
+[sessions]
+max_sessions = 100                   # Max sessions on disk
+max_age_days = 30                    # Auto-cleanup age
 ```
 
 ## Troubleshooting
 
 ### "Failed to connect to daemon"
-The daemon isn't running. Start it with:
 ```bash
 gsh-daemon start --foreground
 ```
 
 ### "API key not configured"
-Set your API key:
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
-# or
-export OPENAI_API_KEY="sk-..."
-```
-
-### Daemon crashes or no response
-Check logs (if configured) or run in foreground to see errors:
-```bash
-gsh-daemon start --foreground
 ```
 
 ### Shell hooks not working
-Make sure `socat` is installed:
 ```bash
-brew install socat  # macOS
-apt install socat   # Linux
+brew install socat   # macOS
+apt install socat    # Linux
 ```
+
+### Context seems empty
+Make sure the zsh plugin is sourced (`source gsh.plugin.zsh`) and tracking is enabled (`gsh-enable`). Run a few commands, then `gsh what commands did I just run` to verify.
 
 ## License
 
