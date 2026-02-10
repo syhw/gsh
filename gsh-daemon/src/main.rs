@@ -913,6 +913,19 @@ async fn run_flow(
                     None
                 }
             }
+            FlowEvent::PublicationCited { publication_id, cited_id, node_id } => {
+                if stream {
+                    Some(DaemonMessage::TextChunk {
+                        text: format!(
+                            "[Citation: {} cited {} (node {})]\n",
+                            publication_id, cited_id, node_id
+                        ),
+                        done: false,
+                    })
+                } else {
+                    None
+                }
+            }
             FlowEvent::PublicationConsensus { publication_id, title, accept_count } => {
                 if stream {
                     Some(DaemonMessage::TextChunk {

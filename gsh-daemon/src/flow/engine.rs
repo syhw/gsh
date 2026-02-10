@@ -3,7 +3,7 @@
 //! Executes multi-agent flows by orchestrating agents across tmux sessions,
 //! handling conditional routing, parallel execution, and context passing.
 
-use super::{CoordinationMode, Flow, NextNode, PublicationStore, PublicationToolHandler};
+use super::{CoordinationMode, Flow, MemoryStore, NextNode, PublicationStore, PublicationToolHandler};
 use crate::agent::{Agent, AgentEvent};
 use crate::config::Config;
 use crate::provider::{self};
@@ -88,6 +88,12 @@ pub enum FlowEvent {
         grade: String,
         consensus_score: i32,
     },
+    /// A publication was cited
+    PublicationCited {
+        publication_id: String,
+        cited_id: String,
+        node_id: String,
+    },
     /// A publication reached consensus
     PublicationConsensus {
         publication_id: String,
@@ -162,6 +168,8 @@ pub struct FlowEngine {
     model_overrides: HashMap<String, String>,
     /// Publication store for publication coordination mode
     publication_store: Option<Arc<PublicationStore>>,
+    /// Memory store for agent memory persistence across instances
+    memory_store: Option<Arc<MemoryStore>>,
 }
 
 impl FlowEngine {
@@ -172,6 +180,7 @@ impl FlowEngine {
             provider_overrides: HashMap::new(),
             model_overrides: HashMap::new(),
             publication_store: None,
+            memory_store: None,
         }
     }
 
@@ -185,6 +194,7 @@ impl FlowEngine {
             publication_store: Some(Arc::new(
                 PublicationStore::new(consensus_threshold).with_self_review(allow_self_review),
             )),
+            memory_store: Some(Arc::new(MemoryStore::new())),
         }
     }
 
@@ -260,6 +270,7 @@ impl FlowEngine {
                 PublicationStore::new(flow.coordination.consensus_threshold)
                     .with_self_review(flow.coordination.allow_self_review),
             ));
+            self.memory_store = Some(Arc::new(MemoryStore::new()));
             info!(
                 "Initialized publication mode with consensus threshold: {}, allow_self_review: {}",
                 flow.coordination.consensus_threshold,
@@ -405,6 +416,17 @@ impl FlowEngine {
             prompt
         };
 
+        // Inject agent memories if available
+        let prompt = if let Some(ref memory_store) = self.memory_store {
+            if let Some(memory_context) = memory_store.format_for_prompt(node_id).await {
+                format!("{}\n\n{}", prompt, memory_context)
+            } else {
+                prompt
+            }
+        } else {
+            prompt
+        };
+
         // Determine provider: node override > role > engine override > config default
         let provider_name = node.provider.clone()
             .or_else(|| role.as_ref().and_then(|r| r.provider.clone()))
@@ -433,11 +455,14 @@ impl FlowEngine {
         if let Some(ref store) = self.publication_store {
             // Generate unique agent ID for this node instance
             let agent_id = format!("{}-{}", node_id, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
-            let handler = PublicationToolHandler::new(
+            let mut handler = PublicationToolHandler::new(
                 store.clone(),
                 agent_id,
                 node_id.to_string(),
             );
+            if let Some(ref memory_store) = self.memory_store {
+                handler = handler.with_memory(memory_store.clone());
+            }
             agent = agent.with_custom_handler(Arc::new(handler));
         }
 
@@ -616,6 +641,17 @@ impl FlowEngine {
             prompt
         };
 
+        // Inject agent memories if available
+        let prompt = if let Some(ref memory_store) = self.memory_store {
+            if let Some(memory_context) = memory_store.format_for_prompt(node_id).await {
+                format!("{}\n\n{}", prompt, memory_context)
+            } else {
+                prompt
+            }
+        } else {
+            prompt
+        };
+
         // Capture publication snapshot before instances run
         let pub_snapshot = self.capture_pub_snapshot().await;
 
@@ -634,6 +670,7 @@ impl FlowEngine {
                 let cwd_clone = cwd.clone();
                 let event_tx_clone = event_tx.clone();
                 let publication_store = self.publication_store.clone();
+                let memory_store = self.memory_store.clone();
                 let node_id_str = node_id.to_string();
                 let node_name = node.name.clone();
                 let flow_name_clone = flow.name.clone();
@@ -659,11 +696,14 @@ impl FlowEngine {
                     if let Some(ref store) = publication_store {
                         let agent_id = format!("{}-{}", instance_id,
                             uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
-                        let handler = PublicationToolHandler::new(
+                        let mut handler = PublicationToolHandler::new(
                             store.clone(),
                             agent_id,
                             node_id_str.clone(),
                         );
+                        if let Some(ref ms) = memory_store {
+                            handler = handler.with_memory(ms.clone());
+                        }
                         agent = agent.with_custom_handler(Arc::new(handler));
                     }
 
@@ -790,11 +830,14 @@ impl FlowEngine {
                 if let Some(ref store) = self.publication_store {
                     let agent_id = format!("{}-{}", instance_id,
                         uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
-                    let handler = PublicationToolHandler::new(
+                    let mut handler = PublicationToolHandler::new(
                         store.clone(),
                         agent_id,
                         node_id.to_string(),
                     );
+                    if let Some(ref ms) = self.memory_store {
+                        handler = handler.with_memory(ms.clone());
+                    }
                     agent = agent.with_custom_handler(Arc::new(handler));
                 }
 
@@ -917,6 +960,7 @@ impl FlowEngine {
             let provider_overrides = self.provider_overrides.clone();
             let model_overrides = self.model_overrides.clone();
             let publication_store = self.publication_store.clone();
+            let memory_store = self.memory_store.clone();
 
             let handle = tokio::spawn(async move {
                 // Create a sub-engine for parallel execution
@@ -926,6 +970,7 @@ impl FlowEngine {
                     provider_overrides,
                     model_overrides,
                     publication_store,
+                    memory_store,
                 };
 
                 let _node = flow_clone.get_node(&node_id_clone)
@@ -948,11 +993,14 @@ impl FlowEngine {
                 // Add publication tools if in publication mode
                 if let Some(ref store) = sub_engine.publication_store {
                     let agent_id = format!("{}-{}", node_id_clone, uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0"));
-                    let handler = PublicationToolHandler::new(
+                    let mut handler = PublicationToolHandler::new(
                         store.clone(),
                         agent_id,
                         node_id_clone.clone(),
                     );
+                    if let Some(ref ms) = sub_engine.memory_store {
+                        handler = handler.with_memory(ms.clone());
+                    }
                     agent = agent.with_custom_handler(Arc::new(handler));
                 }
 
@@ -1078,6 +1126,10 @@ impl FlowEngine {
                 .filter(|p| p.meets_consensus(threshold))
                 .map(|p| p.id.clone())
                 .collect(),
+            citation_sets: all
+                .iter()
+                .map(|p| (p.id.clone(), p.citations.iter().cloned().collect()))
+                .collect(),
         })
     }
 
@@ -1150,6 +1202,25 @@ impl FlowEngine {
             }
         }
 
+        // Emit PublicationCited for new citations
+        for pub_item in &all {
+            let old_citations: HashSet<String> = pre
+                .citation_sets
+                .get(&pub_item.id)
+                .cloned()
+                .unwrap_or_default();
+            let new_citations: HashSet<String> = pub_item.citations.iter().cloned().collect();
+            for cited_id in new_citations.difference(&old_citations) {
+                let _ = event_tx
+                    .send(FlowEvent::PublicationCited {
+                        publication_id: pub_item.id.clone(),
+                        cited_id: cited_id.clone(),
+                        node_id: node_id.to_string(),
+                    })
+                    .await;
+            }
+        }
+
         // Suppress unused warning for post_ids (used for completeness)
         let _ = post_ids;
     }
@@ -1178,6 +1249,8 @@ struct PubSnapshot {
     ids: HashSet<String>,
     review_counts: HashMap<String, usize>,
     consensus_ids: HashSet<String>,
+    /// Forward citation lists per publication (pub_id -> set of cited pub_ids)
+    citation_sets: HashMap<String, HashSet<String>>,
 }
 
 #[cfg(test)]

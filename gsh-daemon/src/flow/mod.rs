@@ -4,11 +4,13 @@
 //! which describe how multiple agents coordinate to accomplish complex tasks.
 
 pub mod engine;
+pub mod memory;
 pub mod parser;
 pub mod pub_tools;
 pub mod publication;
 pub mod roles;
 
+pub use memory::MemoryStore;
 pub use pub_tools::{publication_tool_definitions, PublicationToolHandler, PublicationToolResult};
 pub use publication::{Grade, Publication, PublicationStore, PublicationError, PublicationStats};
 
