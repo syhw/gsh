@@ -491,6 +491,7 @@ impl FlowEngine {
                     }).await;
                     return Err(anyhow::anyhow!("Agent error: {}", e));
                 }
+                AgentEvent::Compacted { .. } => {}
             }
         }
 
@@ -707,6 +708,7 @@ impl FlowEngine {
                                 }).await;
                                 return Err(anyhow::anyhow!("Agent error in {}: {}", instance_id, e));
                             }
+                            AgentEvent::Compacted { .. } => {}
                         }
                     }
 
@@ -840,6 +842,7 @@ impl FlowEngine {
                             }).await;
                             return Err(anyhow::anyhow!("Agent error in {}: {}", instance_id, e));
                         }
+                        AgentEvent::Compacted { .. } => {}
                     }
                 }
 

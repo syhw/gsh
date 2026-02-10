@@ -303,10 +303,10 @@ async fn process_message(
                 ).await;
             }
 
-            // Get shell context
+            // Get ambient shell context (last N commands for JIT loading)
             let context = {
                 let ctx = state.context.read().await;
-                ctx.generate_context(state.config.context.max_context_chars)
+                ctx.generate_ambient_summary(state.config.context.ambient_commands)
             };
 
             // Determine provider name
@@ -341,7 +341,10 @@ async fn process_message(
             let messages = prompt_session.messages.clone();
 
             // Create agent with observer
-            let agent = agent::Agent::new_with_env(provider, &state.config, cwd.clone(), env_info)
+            let agent = agent::Agent::new_with_env(
+                provider, &state.config, cwd.clone(), env_info,
+                Some(state.context_retriever.clone()),
+            )
                 .with_observer(state.observer.clone())
                 .with_session_id(&session_id_for_agent);
 
@@ -386,6 +389,9 @@ async fn process_message(
                         } else {
                             None
                         }
+                    }
+                    agent::AgentEvent::Compacted { summary_tokens, original_tokens } => {
+                        Some(DaemonMessage::Compacted { original_tokens, summary_tokens })
                     }
                     agent::AgentEvent::Error(e) => {
                         had_error = true;
@@ -507,7 +513,10 @@ async fn process_message(
                 let envs = state.session_env.read().await;
                 envs.get(&session_id).cloned()
             };
-            let agent = agent::Agent::new_with_env(provider, &state.config, cwd, env_info)
+            let agent = agent::Agent::new_with_env(
+                provider, &state.config, cwd, env_info,
+                Some(state.context_retriever.clone()),
+            )
                 .with_observer(state.observer.clone())
                 .with_session_id(&session_id);
 
@@ -534,6 +543,9 @@ async fn process_message(
                     agent::AgentEvent::Done { final_text: text } => {
                         final_text = text;
                         Some(DaemonMessage::TextChunk { text: String::new(), done: true })
+                    }
+                    agent::AgentEvent::Compacted { summary_tokens, original_tokens } => {
+                        Some(DaemonMessage::Compacted { original_tokens, summary_tokens })
                     }
                     agent::AgentEvent::Error(e) => {
                         Some(DaemonMessage::Error { message: e, code: None })

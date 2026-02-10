@@ -13,3 +13,6 @@ pub mod provider;
 pub mod session;
 pub mod state;
 pub mod tmux;
+
+#[cfg(test)]
+mod tests;

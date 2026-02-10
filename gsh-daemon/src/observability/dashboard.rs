@@ -653,6 +653,24 @@ fn format_event(event: &ObservabilityEvent) -> (&'static str, Color, String) {
                 ),
             )
         }
+        EventKind::Compaction {
+            original_tokens,
+            summary_tokens,
+            ..
+        } => (
+            "C",
+            Color::Cyan,
+            format!("Compacted: {} -> {} tokens", original_tokens, summary_tokens),
+        ),
+        EventKind::Truncation {
+            tool,
+            original_bytes,
+            truncated_bytes,
+        } => (
+            "T",
+            Color::DarkGray,
+            format!("Truncated {}: {}b -> {}b", tool, original_bytes, truncated_bytes),
+        ),
     }
 }
 

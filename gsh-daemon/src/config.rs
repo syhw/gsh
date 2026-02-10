@@ -153,6 +153,24 @@ pub struct ContextConfig {
     /// Include command outputs in context
     #[serde(default = "default_true")]
     pub include_outputs: bool,
+    /// Max bytes for a single tool output before truncation (0 = no limit)
+    #[serde(default = "default_max_tool_output_bytes")]
+    pub max_tool_output_bytes: usize,
+    /// Tokens worth of recent tool outputs to protect from pruning
+    #[serde(default = "default_prune_protect_tokens")]
+    pub prune_protect_tokens: usize,
+    /// Fraction of context window at which to trigger compaction (0.0-1.0)
+    #[serde(default = "default_compact_threshold")]
+    pub compact_threshold: f64,
+    /// Maximum agent iterations per request
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+    /// Number of recent commands for ambient context (0 = fully JIT)
+    #[serde(default = "default_ambient_commands")]
+    pub ambient_commands: usize,
+    /// Maximum shell history lines to persist on disk
+    #[serde(default = "default_max_history_lines")]
+    pub max_history_lines: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -236,6 +254,30 @@ fn default_max_file_size() -> usize {
     1024 * 1024 // 1MB
 }
 
+fn default_max_tool_output_bytes() -> usize {
+    30_000 // ~7,500 tokens
+}
+
+fn default_prune_protect_tokens() -> usize {
+    40_000
+}
+
+fn default_compact_threshold() -> f64 {
+    0.85
+}
+
+fn default_max_iterations() -> usize {
+    25
+}
+
+fn default_ambient_commands() -> usize {
+    5
+}
+
+fn default_max_history_lines() -> usize {
+    10_000
+}
+
 fn default_max_sessions() -> usize {
     100
 }
@@ -307,6 +349,12 @@ impl Default for ContextConfig {
             max_events: default_max_events(),
             max_context_chars: default_max_context_chars(),
             include_outputs: default_true(),
+            max_tool_output_bytes: default_max_tool_output_bytes(),
+            prune_protect_tokens: default_prune_protect_tokens(),
+            compact_threshold: default_compact_threshold(),
+            max_iterations: default_max_iterations(),
+            ambient_commands: default_ambient_commands(),
+            max_history_lines: default_max_history_lines(),
         }
     }
 }

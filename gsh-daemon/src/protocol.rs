@@ -147,6 +147,11 @@ pub enum DaemonMessage {
     SessionDeleted {
         session_id: String,
     },
+    /// Context was compacted (summarized to save space)
+    Compacted {
+        original_tokens: usize,
+        summary_tokens: usize,
+    },
     /// Shutdown acknowledgment
     ShuttingDown,
 }

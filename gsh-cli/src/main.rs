@@ -151,6 +151,7 @@ enum DaemonMessage {
     AgentList { agents: Vec<AgentInfo> },
     SessionList { sessions: Vec<SessionInfo> },
     SessionDeleted { session_id: String },
+    Compacted { original_tokens: usize, summary_tokens: usize },
     ShuttingDown,
 }
 
@@ -168,7 +169,9 @@ struct EnvInfo {
 
 fn detect_env_info() -> Option<EnvInfo> {
     let conda_env = std::env::var("CONDA_DEFAULT_ENV").ok();
-    let conda_prefix = std::env::var("CONDA_PREFIX").ok();
+    let conda_prefix = std::env::var("CONDA_PREFIX")
+        .ok()
+        .or_else(|| std::env::var("MAMBA_ROOT_PREFIX").ok());
     let virtual_env = std::env::var("VIRTUAL_ENV").ok();
     let path = std::env::var("PATH").ok();
 
@@ -391,6 +394,9 @@ async fn run_prompt(
                     eprintln!("  Error: {}", output.lines().next().unwrap_or(&output));
                 }
             }
+            DaemonMessage::Compacted { original_tokens, summary_tokens } => {
+                eprintln!("[context compacted: {} -> {} tokens]", original_tokens, summary_tokens);
+            }
             DaemonMessage::Response { text, .. } => {
                 println!("{}", text);
                 break;
@@ -507,6 +513,9 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                     if !success && !output.is_empty() {
                         eprintln!("  Error: {}", output.lines().next().unwrap_or(&output));
                     }
+                }
+                DaemonMessage::Compacted { original_tokens, summary_tokens } => {
+                    eprintln!("[context compacted: {} -> {} tokens]", original_tokens, summary_tokens);
                 }
                 DaemonMessage::Error { message, .. } => {
                     eprintln!("Error: {}", message);

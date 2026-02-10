@@ -156,6 +156,21 @@ pub enum EventKind {
         iteration: usize,
         max_iterations: usize,
     },
+
+    /// Context was compacted (summarized to save space)
+    Compaction {
+        original_tokens: usize,
+        summary_tokens: usize,
+        messages_before: usize,
+        messages_after: usize,
+    },
+
+    /// Tool output was truncated
+    Truncation {
+        tool: String,
+        original_bytes: usize,
+        truncated_bytes: usize,
+    },
 }
 
 /// Summary of a completed agent run

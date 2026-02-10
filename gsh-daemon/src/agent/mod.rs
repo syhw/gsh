@@ -48,6 +48,104 @@ pub enum AgentEvent {
     Done { final_text: String },
     /// Error occurred
     Error(String),
+    /// Context was compacted (summarized to save space)
+    Compacted { summary_tokens: usize, original_tokens: usize },
+}
+
+// ============================================================================
+// Context Engineering Helpers
+// ============================================================================
+
+/// Compaction prompt template
+pub(crate) const COMPACTION_PROMPT: &str = r#"You are performing a CONTEXT CHECKPOINT. Summarize the conversation so far into a handoff briefing for yourself to continue the task.
+
+Include:
+- Current progress and key decisions made
+- Important context, constraints, or user preferences discovered
+- Files modified or read (with paths)
+- What remains to be done (clear next steps)
+- Any critical data, code snippets, or references needed to continue
+
+Be thorough but concise. Focus on what's needed to seamlessly continue."#;
+
+/// Estimate token count from text (bytes/4 heuristic, same as Codex)
+pub(crate) fn estimate_tokens(text: &str) -> usize {
+    text.len() / 4
+}
+
+/// Estimate token count for a ChatMessage
+pub(crate) fn estimate_message_tokens(msg: &ChatMessage) -> usize {
+    let content_tokens = match &msg.content {
+        MessageContent::Text(t) => estimate_tokens(t),
+        MessageContent::Blocks(blocks) => {
+            blocks.iter().map(|b| match b {
+                ContentBlock::Text { text } => estimate_tokens(text),
+                ContentBlock::ToolUse { name, input, .. } => {
+                    estimate_tokens(name) + estimate_tokens(&input.to_string())
+                }
+                ContentBlock::ToolResult { content, .. } => estimate_tokens(content),
+            }).sum()
+        }
+    };
+    content_tokens + 4 // per-message overhead
+}
+
+/// Estimate total tokens across all messages
+pub(crate) fn estimate_total_tokens(messages: &[ChatMessage]) -> usize {
+    messages.iter().map(estimate_message_tokens).sum()
+}
+
+/// Find the nearest char boundary at or before the given byte position
+fn find_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() { return s.len(); }
+    let mut p = pos;
+    while p > 0 && !s.is_char_boundary(p) {
+        p -= 1;
+    }
+    p
+}
+
+/// Truncate tool output to max_bytes using prefix-suffix strategy
+pub(crate) fn truncate_tool_output(output: &str, max_bytes: usize) -> String {
+    if max_bytes == 0 || output.len() <= max_bytes {
+        return output.to_string();
+    }
+    let keep = max_bytes / 2;
+    let prefix_end = find_char_boundary(output, keep);
+    let suffix_start = find_char_boundary(output, output.len().saturating_sub(keep));
+    let prefix = &output[..prefix_end];
+    let suffix = &output[suffix_start..];
+    let omitted = output.len() - prefix.len() - suffix.len();
+    format!("{}\n\n... ({} bytes omitted) ...\n\n{}", prefix, omitted, suffix)
+}
+
+/// Prune old tool outputs beyond a protection window
+///
+/// Walks backwards through messages counting tool output tokens.
+/// Once we've seen `protect_tokens` worth of tool outputs, replaces
+/// older (larger) tool outputs with a placeholder.
+pub(crate) fn prune_old_tool_outputs(messages: &mut [ChatMessage], protect_tokens: usize) {
+    let mut seen_tokens: usize = 0;
+    let mut pruned_count = 0usize;
+
+    for msg in messages.iter_mut().rev() {
+        if let MessageContent::Blocks(blocks) = &mut msg.content {
+            for block in blocks.iter_mut().rev() {
+                if let ContentBlock::ToolResult { content, .. } = block {
+                    let tokens = estimate_tokens(content);
+                    if seen_tokens > protect_tokens && tokens > 100 {
+                        *content = format!("[output pruned, was ~{} tokens]", tokens);
+                        pruned_count += 1;
+                    }
+                    seen_tokens += tokens;
+                }
+            }
+        }
+    }
+
+    if pruned_count > 0 {
+        tracing::debug!("Pruned {} old tool outputs (protected {} tokens)", pruned_count, protect_tokens);
+    }
 }
 
 /// The agentic loop that processes messages and executes tools
@@ -67,14 +165,28 @@ pub struct Agent {
     flow_name: Option<String>,
     /// Custom tool handlers (e.g., publication tools for flow coordination)
     custom_handlers: Vec<Arc<dyn CustomToolHandler>>,
+    /// Max bytes for a single tool output before truncation
+    max_tool_output_bytes: usize,
+    /// Tokens worth of recent tool outputs to protect from pruning
+    prune_protect_tokens: usize,
+    /// Context window limit from provider (in tokens)
+    context_limit: usize,
+    /// Fraction of context window at which to trigger compaction
+    compact_threshold: f64,
 }
 
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, config: &Config, cwd: String) -> Self {
-        Self::new_with_env(provider, config, cwd, None)
+        Self::new_with_env(provider, config, cwd, None, None)
     }
 
-    pub fn new_with_env(provider: Box<dyn Provider>, config: &Config, cwd: String, env_info: Option<EnvInfo>) -> Self {
+    pub fn new_with_env(
+        provider: Box<dyn Provider>,
+        config: &Config,
+        cwd: String,
+        env_info: Option<EnvInfo>,
+        context_retriever: Option<Arc<crate::context::ContextRetriever>>,
+    ) -> Self {
         let python_env = detect_python_env(&cwd, env_info.as_ref());
 
         let default_system = format!(
@@ -105,17 +217,25 @@ Guidelines:
             .clone()
             .unwrap_or(default_system);
 
+        let context_limit = provider.capabilities().max_context_tokens
+            .map(|t| t as usize)
+            .unwrap_or(100_000);
+
         Self {
             provider,
-            tool_executor: ToolExecutor::new(config.clone(), cwd),
+            tool_executor: ToolExecutor::new(config.clone(), cwd, context_retriever),
             system_prompt,
             max_tokens: config.llm.max_tokens,
-            max_iterations: 10,
+            max_iterations: config.context.max_iterations,
             observer: None,
             session_id: uuid::Uuid::new_v4().to_string(),
             agent_id: "root".to_string(),
             flow_name: None,
             custom_handlers: Vec::new(),
+            max_tool_output_bytes: config.context.max_tool_output_bytes,
+            prune_protect_tokens: config.context.prune_protect_tokens,
+            context_limit,
+            compact_threshold: config.context.compact_threshold,
         }
     }
 
@@ -234,6 +354,76 @@ Guidelines:
         self.run_loop(messages, event_tx).await
     }
 
+    /// Check if we should trigger compaction
+    fn should_compact(&self, messages: &[ChatMessage]) -> bool {
+        let total = estimate_total_tokens(messages);
+        let threshold = (self.context_limit as f64 * self.compact_threshold) as usize;
+        total > threshold
+    }
+
+    /// Compact the conversation by summarizing it via the LLM
+    async fn compact(
+        &self,
+        messages: Vec<ChatMessage>,
+        event_tx: &mpsc::Sender<AgentEvent>,
+    ) -> Result<Vec<ChatMessage>> {
+        let original_tokens = estimate_total_tokens(&messages);
+        tracing::info!("Compacting context: ~{} tokens (limit: {})", original_tokens, self.context_limit);
+
+        // Build compaction request: full history + compaction prompt
+        let messages_before = messages.len();
+        let mut compact_messages = messages;
+        compact_messages.push(ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::Text(COMPACTION_PROMPT.to_string()),
+        });
+
+        // Use the same provider to generate the summary (non-streaming for simplicity)
+        let summary_response = self.provider.chat(
+            compact_messages,
+            Some(&self.system_prompt),
+            None, // no tools during compaction
+            self.max_tokens,
+        ).await?;
+
+        let summary_text = match &summary_response.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Blocks(blocks) => {
+                blocks.iter().filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                }).collect::<Vec<_>>().join("\n")
+            }
+        };
+
+        let summary_tokens = estimate_tokens(&summary_text);
+
+        // Log compaction event
+        self.log_event(EventKind::Compaction {
+            original_tokens,
+            summary_tokens,
+            messages_before,
+            messages_after: 1,
+        });
+
+        // Notify client
+        let _ = event_tx.send(AgentEvent::Compacted {
+            summary_tokens,
+            original_tokens,
+        }).await;
+
+        tracing::info!("Compacted: {} → {} tokens", original_tokens, summary_tokens);
+
+        // Return new message history with just the summary
+        Ok(vec![ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::Text(format!(
+                "[Context compacted - previous conversation summary]\n\n{}",
+                summary_text
+            )),
+        }])
+    }
+
     async fn run_loop(
         &self,
         mut messages: Vec<ChatMessage>,
@@ -246,6 +436,23 @@ Guidelines:
         self.log_event(EventKind::Start { flow: None });
 
         for iteration in 0..self.max_iterations {
+            // Layer 2: Prune old tool outputs before each LLM call
+            prune_old_tool_outputs(&mut messages, self.prune_protect_tokens);
+
+            // Layer 3: Check if compaction is needed
+            if self.should_compact(&messages) {
+                let to_compact = std::mem::take(&mut messages);
+                match self.compact(to_compact, &event_tx).await {
+                    Ok(compacted) => messages = compacted,
+                    Err(e) => {
+                        tracing::warn!("Compaction failed, continuing with full context: {}", e);
+                        // messages was taken, but compact failed — we lost it
+                        // This is a fatal situation, bail out
+                        return Err(e.context("Compaction failed and context was consumed"));
+                    }
+                }
+            }
+
             // Log iteration
             self.log_event(EventKind::Iteration {
                 iteration,
@@ -409,6 +616,17 @@ Guidelines:
                     (output, success)
                 };
 
+                // Layer 1: Truncate large tool outputs
+                let original_len = output.len();
+                let output = truncate_tool_output(&output, self.max_tool_output_bytes);
+                if output.len() < original_len {
+                    self.log_event(EventKind::Truncation {
+                        tool: name.clone(),
+                        original_bytes: original_len,
+                        truncated_bytes: output.len(),
+                    });
+                }
+
                 let _ = event_tx.send(AgentEvent::ToolResult {
                     name: name.clone(),
                     output: output.clone(),
@@ -498,6 +716,7 @@ Or prefix commands with the full path: {}/bin/python3"#,
         (home.join("mambaforge"), "mamba (mambaforge)"),
         (home.join("micromamba"), "micromamba"),
         (home.join(".local/share/micromamba"), "micromamba"),
+        (home.join(".local/share/mamba"), "mamba"),
     ];
     for (path, label) in &conda_paths {
         if path.exists() {
@@ -547,5 +766,233 @@ When Python is needed, create a venv at {} using:
         };
 
         format!("Python environments found:\n{}{}", found.join("\n"), preferred)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ===== Token estimation tests =====
+
+    #[test]
+    fn test_estimate_tokens_empty() {
+        assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_estimate_tokens_short() {
+        // "hello" = 5 bytes / 4 = 1 token
+        assert_eq!(estimate_tokens("hello"), 1);
+    }
+
+    #[test]
+    fn test_estimate_tokens_longer() {
+        // 400 bytes / 4 = 100 tokens
+        let text = "a".repeat(400);
+        assert_eq!(estimate_tokens(&text), 100);
+    }
+
+    #[test]
+    fn test_estimate_message_tokens_text() {
+        let msg = ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::Text("hello world".to_string()),
+        };
+        // 11 bytes / 4 = 2, + 4 overhead = 6
+        assert_eq!(estimate_message_tokens(&msg), 6);
+    }
+
+    #[test]
+    fn test_estimate_message_tokens_blocks() {
+        let msg = ChatMessage {
+            role: ChatRole::Assistant,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Text { text: "hello".to_string() },
+                ContentBlock::ToolResult {
+                    tool_use_id: "1".into(),
+                    content: "result data".to_string(),
+                    is_error: Some(false),
+                },
+            ]),
+        };
+        // "hello" = 1, "result data" = 2, + 4 overhead = 7
+        let tokens = estimate_message_tokens(&msg);
+        assert_eq!(tokens, 7);
+    }
+
+    #[test]
+    fn test_estimate_total_tokens() {
+        let messages = vec![
+            ChatMessage {
+                role: ChatRole::User,
+                content: MessageContent::Text("a".repeat(400)),
+            },
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::Text("b".repeat(200)),
+            },
+        ];
+        // (400/4 + 4) + (200/4 + 4) = 104 + 54 = 158
+        assert_eq!(estimate_total_tokens(&messages), 158);
+    }
+
+    // ===== find_char_boundary tests =====
+
+    #[test]
+    fn test_find_char_boundary_ascii() {
+        let s = "hello world";
+        assert_eq!(find_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn test_find_char_boundary_beyond_len() {
+        let s = "hi";
+        assert_eq!(find_char_boundary(s, 100), 2);
+    }
+
+    #[test]
+    fn test_find_char_boundary_multibyte() {
+        // "Héllo" — 'é' is 2 bytes (0xC3, 0xA9), so byte 2 is mid-char
+        let s = "Héllo";
+        assert!(s.len() > 5); // 6 bytes
+        // byte 2 is inside 'é', should snap back to byte 1
+        assert_eq!(find_char_boundary(s, 2), 1);
+        // byte 3 is the start of 'l'
+        assert_eq!(find_char_boundary(s, 3), 3);
+    }
+
+    // ===== truncate_tool_output tests =====
+
+    #[test]
+    fn test_truncate_small_output() {
+        let output = "small output";
+        let result = truncate_tool_output(output, 100);
+        assert_eq!(result, "small output");
+    }
+
+    #[test]
+    fn test_truncate_zero_limit() {
+        let output = "anything";
+        let result = truncate_tool_output(output, 0);
+        assert_eq!(result, "anything");
+    }
+
+    #[test]
+    fn test_truncate_large_output() {
+        let output = "A".repeat(100);
+        let result = truncate_tool_output(&output, 40);
+        // Should have prefix (20 chars) + omission marker + suffix (20 chars)
+        assert!(result.contains("... ("));
+        assert!(result.contains("bytes omitted) ..."));
+        // Prefix should be the first 20 A's
+        assert!(result.starts_with(&"A".repeat(20)));
+        // Suffix should be the last 20 A's
+        assert!(result.ends_with(&"A".repeat(20)));
+        // Total should be smaller than original
+        assert!(result.len() < output.len() + 50); // some overhead from marker
+    }
+
+    #[test]
+    fn test_truncate_multibyte_safe() {
+        // Create a string with multi-byte characters
+        let output = "日本語".repeat(100); // each char is 3 bytes
+        let result = truncate_tool_output(&output, 50);
+        // Should not panic — the result should be valid UTF-8
+        assert!(result.contains("bytes omitted"));
+    }
+
+    // ===== prune_old_tool_outputs tests =====
+
+    fn make_tool_result_message(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: ChatRole::User,
+            content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                tool_use_id: "test".to_string(),
+                content: content.to_string(),
+                is_error: Some(false),
+            }]),
+        }
+    }
+
+    #[test]
+    fn test_prune_within_protection_window() {
+        let mut messages = vec![
+            make_tool_result_message("short output"),
+            make_tool_result_message("another short one"),
+        ];
+        // protect_tokens = 1000, these are tiny — nothing should be pruned
+        prune_old_tool_outputs(&mut messages, 1000);
+
+        // Verify nothing was pruned
+        for msg in &messages {
+            if let MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    if let ContentBlock::ToolResult { content, .. } = block {
+                        assert!(!content.contains("pruned"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_prune_old_outputs_beyond_window() {
+        // Create messages with large tool outputs
+        let large_output = "x".repeat(2000); // 2000 bytes = ~500 tokens
+        let mut messages = vec![
+            make_tool_result_message(&large_output), // oldest - should be pruned
+            make_tool_result_message(&large_output), // middle - should be pruned
+            make_tool_result_message(&large_output), // newest - protected
+        ];
+
+        // Protect only 400 tokens — last message ~500 tokens, so oldest two should be pruned
+        prune_old_tool_outputs(&mut messages, 400);
+
+        // Check newest (last) is preserved
+        if let MessageContent::Blocks(blocks) = &messages[2].content {
+            if let ContentBlock::ToolResult { content, .. } = &blocks[0] {
+                assert!(!content.contains("pruned"), "Newest should be preserved");
+            }
+        }
+
+        // Check oldest (first) is pruned
+        if let MessageContent::Blocks(blocks) = &messages[0].content {
+            if let ContentBlock::ToolResult { content, .. } = &blocks[0] {
+                assert!(content.contains("pruned"), "Oldest should be pruned");
+            }
+        }
+    }
+
+    #[test]
+    fn test_prune_skips_small_outputs() {
+        // Small outputs (< 100 tokens) should never be pruned
+        let small_output = "ok"; // 0 tokens estimate — below 100 threshold
+        let large_output = "x".repeat(2000); // ~500 tokens
+
+        let mut messages = vec![
+            make_tool_result_message(small_output),  // small — should NOT be pruned
+            make_tool_result_message(&large_output), // large — protected (newest)
+        ];
+
+        prune_old_tool_outputs(&mut messages, 0); // protect nothing
+
+        // Small output should still be intact (below 100-token threshold)
+        if let MessageContent::Blocks(blocks) = &messages[0].content {
+            if let ContentBlock::ToolResult { content, .. } = &blocks[0] {
+                assert_eq!(content, "ok", "Small outputs should not be pruned");
+            }
+        }
+    }
+
+    // ===== Config defaults tests =====
+
+    #[test]
+    fn test_context_config_defaults() {
+        let config: crate::config::ContextConfig = Default::default();
+        assert_eq!(config.max_tool_output_bytes, 30_000);
+        assert_eq!(config.prune_protect_tokens, 40_000);
+        assert!((config.compact_threshold - 0.85).abs() < f64::EPSILON);
+        assert_eq!(config.max_iterations, 25);
     }
 }

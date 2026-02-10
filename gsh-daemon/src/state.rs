@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::context::ContextAccumulator;
+use crate::context::{ContextAccumulator, ContextRetriever};
 use crate::observability::Observer;
 use crate::protocol::EnvInfo;
 use crate::session::Session;
@@ -25,6 +25,8 @@ pub struct DaemonState {
     pub observer: Arc<Observer>,
     /// Session storage directory
     pub session_dir: PathBuf,
+    /// Context retriever for the search_context tool
+    pub context_retriever: Arc<ContextRetriever>,
 }
 
 impl DaemonState {
@@ -61,14 +63,37 @@ impl DaemonState {
             }
         };
 
+        // Data directory for persistent stores
+        let data_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("gsh");
+
+        // Shell history file path
+        let history_path = data_dir.join("shell-history.jsonl");
+
+        // Create context accumulator with persistent history
+        let context = ContextAccumulator::with_history(
+            max_events,
+            history_path.clone(),
+            config.context.max_history_lines,
+        );
+
+        // Create context retriever
+        let context_retriever = Arc::new(ContextRetriever::new(
+            history_path,
+            data_dir.join("logs"),
+            session_dir.clone(),
+        ));
+
         Arc::new(Self {
             config,
-            context: RwLock::new(ContextAccumulator::new(max_events)),
+            context: RwLock::new(context),
             sessions: RwLock::new(HashMap::new()),
             session_env: RwLock::new(HashMap::new()),
             started_at: std::time::Instant::now(),
             observer,
             session_dir,
+            context_retriever,
         })
     }
 

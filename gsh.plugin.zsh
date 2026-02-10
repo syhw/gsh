@@ -27,7 +27,7 @@ _gsh_send() {
 
     # Use socat if available, fall back to nc
     if command -v socat &>/dev/null; then
-        echo "$1" | socat -t0.1 - "UNIX-CONNECT:$GSH_SOCKET" &>/dev/null &!
+        echo "$1" | socat -t2 - "UNIX-CONNECT:$GSH_SOCKET" &>/dev/null &!
     elif command -v nc &>/dev/null; then
         echo "$1" | nc -U "$GSH_SOCKET" &>/dev/null &!
     fi

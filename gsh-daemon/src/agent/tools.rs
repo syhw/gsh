@@ -1,10 +1,12 @@
 use crate::config::Config;
+use crate::context::ContextRetriever;
 use crate::provider::ToolDefinition;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
 
 /// Detailed result from bash command execution
@@ -66,13 +68,15 @@ impl ToolResult {
 pub struct ToolExecutor {
     config: Config,
     cwd: PathBuf,
+    context_retriever: Option<Arc<ContextRetriever>>,
 }
 
 impl ToolExecutor {
-    pub fn new(config: Config, cwd: String) -> Self {
+    pub fn new(config: Config, cwd: String, context_retriever: Option<Arc<ContextRetriever>>) -> Self {
         Self {
             config,
             cwd: PathBuf::from(cwd),
+            context_retriever,
         }
     }
 
@@ -222,6 +226,46 @@ impl ToolExecutor {
             });
         }
 
+        // search_context tool (only if retriever is available)
+        if self.context_retriever.is_some() {
+            tools.push(ToolDefinition {
+                name: "search_context".to_string(),
+                description: "Search shell command history, past agent sessions, and observability logs. Use this to recall what commands were run, what the user worked on previously, past errors, or previous agent interactions.".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "source": {
+                            "type": "string",
+                            "enum": ["shell_history", "sessions", "logs"],
+                            "description": "Which data store to search:\n- shell_history: Shell command history (commands, exit codes, directories)\n- sessions: Past agent conversation sessions\n- logs: Observability logs (bash executions with stdout/stderr, tool calls)"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search pattern or keyword (substring match, case-insensitive). Omit to get most recent entries."
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Filter by working directory prefix. Only for shell_history."
+                        },
+                        "exit_code": {
+                            "type": "integer",
+                            "description": "Filter by exit code. Use -1 to find all failures. Only for shell_history."
+                        },
+                        "event_type": {
+                            "type": "string",
+                            "enum": ["bash_exec", "tool_call", "prompt", "error"],
+                            "description": "Filter by event type. Only for logs."
+                        },
+                        "last_n": {
+                            "type": "integer",
+                            "description": "Return only the last N matching results (default: 20, max: 50)"
+                        }
+                    },
+                    "required": ["source"]
+                }),
+            });
+        }
+
         tools
     }
 
@@ -234,6 +278,7 @@ impl ToolExecutor {
             "edit" => self.exec_edit(input).await.map(ToolResult::Text),
             "glob" => self.exec_glob(input).await.map(ToolResult::Text),
             "grep" => self.exec_grep(input).await.map(ToolResult::Text),
+            "search_context" => self.exec_search_context(input).await.map(ToolResult::Text),
             _ => anyhow::bail!("Unknown tool: {}", name),
         }
     }
@@ -538,5 +583,164 @@ impl ToolExecutor {
         } else {
             Ok(format!("Search error: {}", stderr))
         }
+    }
+
+    async fn exec_search_context(&self, input: &serde_json::Value) -> Result<String> {
+        let retriever = self.context_retriever.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Context retriever not available"))?;
+
+        let source = input["source"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing 'source' parameter"))?;
+
+        let query = input["query"].as_str();
+        let last_n = input["last_n"].as_u64().unwrap_or(20) as usize;
+
+        match source {
+            "shell_history" => {
+                let cwd = input["cwd"].as_str();
+                let exit_code = input["exit_code"].as_i64().map(|c| c as i32);
+                retriever.search_shell_history(query, cwd, exit_code, last_n)
+            }
+            "sessions" => {
+                let keyword = query.unwrap_or("");
+                if keyword.is_empty() {
+                    anyhow::bail!("'query' is required when searching sessions");
+                }
+                retriever.search_sessions(keyword, last_n.min(10))
+            }
+            "logs" => {
+                let event_type = input["event_type"].as_str();
+                let session_id = input.get("session_id").and_then(|v| v.as_str());
+                retriever.search_logs(query, event_type, session_id, last_n)
+            }
+            _ => anyhow::bail!("Invalid source '{}'. Must be one of: shell_history, sessions, logs", source),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::context::{ContextAccumulator, ContextRetriever};
+    use tempfile::TempDir;
+
+    fn make_retriever(tmp: &TempDir) -> Arc<ContextRetriever> {
+        let history_path = tmp.path().join("shell-history.jsonl");
+        let log_dir = tmp.path().join("logs");
+        let session_dir = tmp.path().join("sessions");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::create_dir_all(&session_dir).unwrap();
+        Arc::new(ContextRetriever::new(history_path, log_dir, session_dir))
+    }
+
+    fn make_executor(tmp: &TempDir) -> ToolExecutor {
+        let retriever = make_retriever(tmp);
+        ToolExecutor::new(Config::default(), "/tmp".to_string(), Some(retriever))
+    }
+
+    #[test]
+    fn test_search_context_tool_definition_present() {
+        let tmp = TempDir::new().unwrap();
+        let executor = make_executor(&tmp);
+        let defs = executor.definitions();
+        assert!(defs.iter().any(|d| d.name == "search_context"));
+    }
+
+    #[test]
+    fn test_search_context_tool_definition_absent_without_retriever() {
+        let executor = ToolExecutor::new(Config::default(), "/tmp".to_string(), None);
+        let defs = executor.definitions();
+        assert!(!defs.iter().any(|d| d.name == "search_context"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_search_context_shell_history() {
+        let tmp = TempDir::new().unwrap();
+        let history_path = tmp.path().join("shell-history.jsonl");
+
+        // Write some history events
+        let mut acc = ContextAccumulator::with_history(100, history_path.clone(), 10_000);
+        let now = chrono::Utc::now();
+        acc.preexec("cargo build".to_string(), "/project".to_string(), now);
+        acc.postcmd(0, "/project".to_string(), None, now);
+        acc.preexec("cargo test".to_string(), "/project".to_string(), now);
+        acc.postcmd(1, "/project".to_string(), None, now);
+
+        let retriever = Arc::new(ContextRetriever::new(
+            history_path,
+            tmp.path().join("logs"),
+            tmp.path().join("sessions"),
+        ));
+        let executor = ToolExecutor::new(Config::default(), "/tmp".to_string(), Some(retriever));
+
+        // Search all
+        let result = executor.exec_search_context(&json!({
+            "source": "shell_history"
+        })).await.unwrap();
+        assert!(result.contains("cargo build"));
+        assert!(result.contains("cargo test"));
+
+        // Search with query
+        let result = executor.exec_search_context(&json!({
+            "source": "shell_history",
+            "query": "build"
+        })).await.unwrap();
+        assert!(result.contains("cargo build"));
+        assert!(!result.contains("cargo test"));
+
+        // Search failures
+        let result = executor.exec_search_context(&json!({
+            "source": "shell_history",
+            "exit_code": -1
+        })).await.unwrap();
+        assert!(result.contains("cargo test"));
+        assert!(!result.contains("cargo build"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_search_context_sessions_requires_query() {
+        let tmp = TempDir::new().unwrap();
+        let executor = make_executor(&tmp);
+
+        let result = executor.exec_search_context(&json!({
+            "source": "sessions"
+        })).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("query"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_search_context_logs_empty() {
+        let tmp = TempDir::new().unwrap();
+        let executor = make_executor(&tmp);
+
+        let result = executor.exec_search_context(&json!({
+            "source": "logs"
+        })).await.unwrap();
+        assert!(result.contains("No matching"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_search_context_invalid_source() {
+        let tmp = TempDir::new().unwrap();
+        let executor = make_executor(&tmp);
+
+        let result = executor.exec_search_context(&json!({
+            "source": "invalid"
+        })).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid source"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_search_context_no_retriever() {
+        let executor = ToolExecutor::new(Config::default(), "/tmp".to_string(), None);
+
+        let result = executor.exec_search_context(&json!({
+            "source": "shell_history"
+        })).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not available"));
     }
 }
