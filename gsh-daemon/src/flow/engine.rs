@@ -4,7 +4,7 @@
 //! handling conditional routing, parallel execution, and context passing.
 
 use super::{CoordinationMode, Flow, MemoryStore, NextNode, PublicationStore, PublicationToolHandler};
-use crate::agent::{Agent, AgentEvent};
+use crate::agent::{Agent, AgentEvent, CustomToolHandler};
 use crate::config::Config;
 use crate::provider::{self};
 use crate::tmux::{AgentSessionConfig, TmuxManager};
@@ -170,6 +170,8 @@ pub struct FlowEngine {
     publication_store: Option<Arc<PublicationStore>>,
     /// Memory store for agent memory persistence across instances
     memory_store: Option<Arc<MemoryStore>>,
+    /// MCP tool handler (shared across all agents in this flow)
+    mcp_handler: Option<Arc<dyn CustomToolHandler>>,
 }
 
 impl FlowEngine {
@@ -181,6 +183,7 @@ impl FlowEngine {
             model_overrides: HashMap::new(),
             publication_store: None,
             memory_store: None,
+            mcp_handler: None,
         }
     }
 
@@ -195,7 +198,14 @@ impl FlowEngine {
                 PublicationStore::new(consensus_threshold).with_self_review(allow_self_review),
             )),
             memory_store: Some(Arc::new(MemoryStore::new())),
+            mcp_handler: None,
         }
+    }
+
+    /// Set an MCP tool handler for all agents in this flow
+    pub fn with_mcp_handler(mut self, handler: Arc<dyn CustomToolHandler>) -> Self {
+        self.mcp_handler = Some(handler);
+        self
     }
 
     /// Get the publication store (if in publication mode)
@@ -466,6 +476,11 @@ impl FlowEngine {
             agent = agent.with_custom_handler(Arc::new(handler));
         }
 
+        // Add MCP tools if available
+        if let Some(ref mcp) = self.mcp_handler {
+            agent = agent.with_custom_handler(mcp.clone());
+        }
+
         // Capture publication snapshot before agent runs (for diffing)
         let pub_snapshot = self.capture_pub_snapshot().await;
 
@@ -671,6 +686,7 @@ impl FlowEngine {
                 let event_tx_clone = event_tx.clone();
                 let publication_store = self.publication_store.clone();
                 let memory_store = self.memory_store.clone();
+                let mcp_handler = self.mcp_handler.clone();
                 let node_id_str = node_id.to_string();
                 let node_name = node.name.clone();
                 let flow_name_clone = flow.name.clone();
@@ -705,6 +721,11 @@ impl FlowEngine {
                             handler = handler.with_memory(ms.clone());
                         }
                         agent = agent.with_custom_handler(Arc::new(handler));
+                    }
+
+                    // Add MCP tools if available
+                    if let Some(ref mcp) = mcp_handler {
+                        agent = agent.with_custom_handler(mcp.clone());
                     }
 
                     let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
@@ -841,6 +862,11 @@ impl FlowEngine {
                     agent = agent.with_custom_handler(Arc::new(handler));
                 }
 
+                // Add MCP tools if available
+                if let Some(ref mcp) = self.mcp_handler {
+                    agent = agent.with_custom_handler(mcp.clone());
+                }
+
                 let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);
                 let event_tx_clone = event_tx.clone();
                 let instance_id_clone = instance_id.clone();
@@ -961,6 +987,7 @@ impl FlowEngine {
             let model_overrides = self.model_overrides.clone();
             let publication_store = self.publication_store.clone();
             let memory_store = self.memory_store.clone();
+            let mcp_handler = self.mcp_handler.clone();
 
             let handle = tokio::spawn(async move {
                 // Create a sub-engine for parallel execution
@@ -971,6 +998,7 @@ impl FlowEngine {
                     model_overrides,
                     publication_store,
                     memory_store,
+                    mcp_handler,
                 };
 
                 let _node = flow_clone.get_node(&node_id_clone)
@@ -1002,6 +1030,11 @@ impl FlowEngine {
                         handler = handler.with_memory(ms.clone());
                     }
                     agent = agent.with_custom_handler(Arc::new(handler));
+                }
+
+                // Add MCP tools if available
+                if let Some(ref mcp) = sub_engine.mcp_handler {
+                    agent = agent.with_custom_handler(mcp.clone());
                 }
 
                 let (agent_event_tx, mut agent_event_rx) = mpsc::channel::<AgentEvent>(100);

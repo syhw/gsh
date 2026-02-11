@@ -1,4 +1,4 @@
-use gsh_daemon::{agent, config, flow, observability, protocol, provider, session, state, tmux};
+use gsh_daemon::{agent, config, flow, mcp, observability, protocol, provider, session, state, tmux};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -341,12 +341,23 @@ async fn process_message(
             let messages = prompt_session.messages.clone();
 
             // Create agent with observer
-            let agent = agent::Agent::new_with_env(
+            let mut agent = agent::Agent::new_with_env(
                 provider, &state.config, cwd.clone(), env_info,
                 Some(state.context_retriever.clone()),
             )
                 .with_observer(state.observer.clone())
                 .with_session_id(&session_id_for_agent);
+
+            // Connect MCP servers if configured
+            if !state.config.mcp.servers.is_empty() {
+                match mcp::McpToolHandler::connect(&state.config.mcp.servers).await {
+                    Ok(handler) if handler.has_tools() => {
+                        agent = agent.with_custom_handler(Arc::new(handler));
+                    }
+                    Ok(_) => {} // No tools discovered
+                    Err(e) => warn!("MCP connection failed: {}", e),
+                }
+            }
 
             // Create event channel
             let (event_tx, mut event_rx) = mpsc::channel::<agent::AgentEvent>(100);
@@ -513,12 +524,23 @@ async fn process_message(
                 let envs = state.session_env.read().await;
                 envs.get(&session_id).cloned()
             };
-            let agent = agent::Agent::new_with_env(
+            let mut agent = agent::Agent::new_with_env(
                 provider, &state.config, cwd, env_info,
                 Some(state.context_retriever.clone()),
             )
                 .with_observer(state.observer.clone())
                 .with_session_id(&session_id);
+
+            // Connect MCP servers if configured
+            if !state.config.mcp.servers.is_empty() {
+                match mcp::McpToolHandler::connect(&state.config.mcp.servers).await {
+                    Ok(handler) if handler.has_tools() => {
+                        agent = agent.with_custom_handler(Arc::new(handler));
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!("MCP connection failed: {}", e),
+                }
+            }
 
             let (event_tx, mut event_rx) = mpsc::channel::<agent::AgentEvent>(100);
 
@@ -768,6 +790,17 @@ async fn run_flow(
 
     // Create flow engine
     let mut engine = FlowEngine::new(state.config.clone());
+
+    // Connect MCP servers for flow agents
+    if !state.config.mcp.servers.is_empty() {
+        match mcp::McpToolHandler::connect(&state.config.mcp.servers).await {
+            Ok(handler) if handler.has_tools() => {
+                engine = engine.with_mcp_handler(Arc::new(handler));
+            }
+            Ok(_) => {}
+            Err(e) => warn!("MCP connection for flow failed: {}", e),
+        }
+    }
 
     // Create event channel
     let (event_tx, mut event_rx) = mpsc::channel::<FlowEvent>(100);

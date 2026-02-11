@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,6 +15,8 @@ pub struct Config {
     pub tools: ToolsConfig,
     #[serde(default)]
     pub sessions: SessionsConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,6 +299,25 @@ pub struct SessionsConfig {
     pub max_age_days: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpConfig {
+    /// MCP server configurations, keyed by server name
+    #[serde(default)]
+    pub servers: HashMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpServerConfig {
+    /// Transport type (currently only "streamable-http" supported)
+    #[serde(rename = "type")]
+    pub transport_type: String,
+    /// MCP endpoint URL
+    pub url: String,
+    /// Custom HTTP headers (supports $ENV_VAR expansion in values)
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
 impl Default for SessionsConfig {
     fn default() -> Self {
         Self {
@@ -313,6 +335,7 @@ impl Default for Config {
             context: ContextConfig::default(),
             tools: ToolsConfig::default(),
             sessions: SessionsConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }

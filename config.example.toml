@@ -70,3 +70,12 @@ excluded_paths = [
 
 # Maximum file size to read (bytes)
 max_file_size = 1048576  # 1MB
+
+# [mcp] - MCP (Model Context Protocol) server configuration
+# Add external tool servers that agents can use.
+# Header values support $ENV_VAR expansion.
+#
+# [mcp.servers.web-search-prime]
+# type = "streamable-http"
+# url = "https://api.z.ai/api/mcp/web_search_prime/mcp"
+# headers = { Authorization = "Bearer $ZAI_API_KEY" }
