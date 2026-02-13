@@ -1,8 +1,8 @@
 #!/usr/bin/env zsh
-# gsh.plugin.zsh - Zsh plugin for gsh (Gab's Shell / Agentic Shell)
+# gsh.plugin.zsh - Zsh plugin for gsh (Agentic Shell)
 #
 # This plugin hooks into your shell to capture context and provides
-# the `llm` command for interacting with the LLM daemon.
+# shell hooks for the gsh daemon.
 
 # Configuration
 GSH_SOCKET="${GSH_SOCKET:-/tmp/gsh-${USER}.sock}"
@@ -97,65 +97,6 @@ _gsh_chpwd() {
 
     local msg="{\"type\":\"chpwd\",\"old_cwd\":\"${escaped_old}\",\"new_cwd\":\"${escaped_new}\",\"timestamp\":\"${timestamp}\"}"
     _gsh_send "$msg"
-}
-
-# Main llm command
-# Usage: llm what files are in this directory   (no quotes needed!)
-#        llm - < prompt.txt                     (read from file)
-#        echo "prompt" | llm                    (read from pipe)
-#        llm chat                               (interactive mode)
-#        llm --provider openai "use GPT"        (provider override)
-#        llm --model claude-opus "complex task" (model override)
-#        llm --flow code-review "review code"   (run a flow)
-llm() {
-    if ! command -v "$GSH_CLI_BIN" &>/dev/null; then
-        echo "Error: gsh CLI not found. Install it with: cargo install --path gsh-cli"
-        return 1
-    fi
-
-    # If no args and stdin is not a tty, read from stdin
-    if [[ $# -eq 0 ]]; then
-        if [[ ! -t 0 ]]; then
-            "$GSH_CLI_BIN" -
-            return $?
-        fi
-        echo "Usage: llm <query>              (no quotes needed)"
-        echo "       llm - < file.txt         (read from file)"
-        echo "       echo 'prompt' | llm      (read from pipe)"
-        echo "       llm chat                 (interactive mode)"
-        echo "       llm status               (daemon status)"
-        echo ""
-        echo "Options:"
-        echo "       --provider <name>        (anthropic, openai, moonshot, ollama)"
-        echo "       --model <model>          (model override)"
-        echo "       --flow <flow-name>       (run a flow)"
-        return 1
-    fi
-
-    case "$1" in
-        chat)
-            shift
-            "$GSH_CLI_BIN" chat "$@"
-            ;;
-        status)
-            "$GSH_CLI_BIN" status
-            ;;
-        stop)
-            "$GSH_CLI_BIN" stop
-            ;;
-        agents)
-            shift
-            gsh-agents "$@"
-            ;;
-        -)
-            # Explicit stdin read
-            shift
-            "$GSH_CLI_BIN" - "$@"
-            ;;
-        *)
-            "$GSH_CLI_BIN" "$@"
-            ;;
-    esac
 }
 
 # List running subagents
@@ -306,7 +247,7 @@ gsh-stop() {
         return 0
     fi
 
-    llm stop
+    "$GSH_CLI_BIN" stop
 }
 
 # Restart daemon helper

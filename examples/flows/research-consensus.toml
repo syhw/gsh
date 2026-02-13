@@ -6,7 +6,7 @@
 # - A synthesizer produces the final output from consensus publications
 #
 # Usage:
-#   llm --flow research-consensus "Find potential security issues in the codebase"
+#   gsh --flow research-consensus "Find potential security issues in the codebase"
 
 [flow]
 name = "research-consensus"

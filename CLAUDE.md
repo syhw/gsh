@@ -39,7 +39,7 @@ A zsh plugin + Rust daemon for an agentic coding CLI. The daemon captures shell 
 gsh_claude/
 ├── Cargo.toml                    # Workspace root
 ├── config.example.toml           # Example configuration
-├── gsh.plugin.zsh                # Zsh plugin (hooks, llm command)
+├── gsh.plugin.zsh                # Zsh plugin (shell hooks)
 ├── examples/flows/               # Example flow definitions
 ├── gsh-daemon/                   # Daemon crate
 │   └── src/
@@ -84,11 +84,10 @@ cargo build --release
 ./target/release/gsh-daemon start --foreground
 
 # Use CLI (in another terminal)
-source gsh.plugin.zsh
-llm what files are here
+gsh what files are here
 
 # Run a flow
-llm --flow code-review "Review my recent changes"
+gsh --flow code-review "Review my recent changes"
 
 # Open observability dashboard
 ./target/release/gsh-daemon dashboard
@@ -165,7 +164,7 @@ Required: Set API key for at least one provider via environment variable or conf
 1. Create TOML file in `~/.config/gsh/flows/<name>.toml`
 2. Define nodes with roles, tools, model preferences
 3. Define edges for routing (sequential, conditional, parallel)
-4. Test with `llm --flow <name> "<prompt>"`
+4. Test with `gsh --flow <name> "<prompt>"`
 
 ### Adding custom tool handlers
 1. Implement `CustomToolHandler` trait in your module

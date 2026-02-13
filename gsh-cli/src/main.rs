@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -335,6 +336,54 @@ async fn connect() -> Result<UnixStream> {
         })
 }
 
+/// Check if generation stats should be displayed.
+/// Shows when stderr is a terminal, or when GSH_STATS=1 is set.
+fn should_show_stats() -> bool {
+    if std::env::var("GSH_STATS").as_deref() == Ok("0") {
+        return false;
+    }
+    io::stderr().is_terminal() || std::env::var("GSH_STATS").as_deref() == Ok("1")
+}
+
+/// Print generation timing stats (TTFT, tokens/sec) to stderr in dim text
+fn print_generation_stats(
+    start: Instant,
+    first_token_time: Option<std::time::Duration>,
+    total_chars: usize,
+) {
+    let total = start.elapsed();
+    // Estimate tokens: ~4 chars per token (standard heuristic)
+    let estimated_tokens = (total_chars + 2) / 4;
+
+    if let Some(ttft) = first_token_time {
+        let generation_time = total.saturating_sub(ttft);
+        let tps = if generation_time.as_secs_f64() > 0.01 && estimated_tokens > 1 {
+            // tokens/sec during generation (excludes TTFT)
+            estimated_tokens as f64 / generation_time.as_secs_f64()
+        } else {
+            0.0
+        };
+
+        let ttft_str = if ttft.as_secs_f64() >= 1.0 {
+            format!("{:.1}s", ttft.as_secs_f64())
+        } else {
+            format!("{:.0}ms", ttft.as_millis())
+        };
+
+        if tps > 0.0 {
+            eprint!(
+                "\x1b[2m[TTFT {ttft_str} | {tps:.0} tok/s | ~{estimated_tokens} tokens | {:.1}s]\x1b[0m\n",
+                total.as_secs_f64()
+            );
+        } else {
+            eprint!(
+                "\x1b[2m[TTFT {ttft_str} | ~{estimated_tokens} tokens | {:.1}s]\x1b[0m\n",
+                total.as_secs_f64()
+            );
+        }
+    }
+}
+
 async fn run_prompt(
     query: &str,
     stream: bool,
@@ -362,6 +411,12 @@ async fn run_prompt(
 
     let mut line = String::new();
     let mut stdout = io::stdout();
+    let show_stats = should_show_stats();
+
+    // Timing
+    let start = Instant::now();
+    let mut first_token_time: Option<std::time::Duration> = None;
+    let mut total_chars: usize = 0;
 
     loop {
         line.clear();
@@ -375,11 +430,18 @@ async fn run_prompt(
         match response {
             DaemonMessage::TextChunk { text, done } => {
                 if !text.is_empty() {
+                    if first_token_time.is_none() {
+                        first_token_time = Some(start.elapsed());
+                    }
+                    total_chars += text.len();
                     print!("{}", text);
                     stdout.flush()?;
                 }
                 if done {
                     println!();
+                    if show_stats {
+                        print_generation_stats(start, first_token_time, total_chars);
+                    }
                     break;
                 }
             }
@@ -451,6 +513,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    let show_stats = should_show_stats();
 
     loop {
         print!("> ");
@@ -483,6 +546,11 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
         let msg_str = serde_json::to_string(&msg)? + "\n";
         writer.write_all(msg_str.as_bytes()).await?;
 
+        // Timing for this exchange
+        let msg_start = Instant::now();
+        let mut first_token_time: Option<std::time::Duration> = None;
+        let mut total_chars: usize = 0;
+
         // Receive response
         loop {
             line.clear();
@@ -496,11 +564,19 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
             match response {
                 DaemonMessage::TextChunk { text, done } => {
                     if !text.is_empty() {
+                        if first_token_time.is_none() {
+                            first_token_time = Some(msg_start.elapsed());
+                        }
+                        total_chars += text.len();
                         print!("{}", text);
                         stdout.flush()?;
                     }
                     if done {
-                        println!("\n");
+                        println!();
+                        if show_stats {
+                            print_generation_stats(msg_start, first_token_time, total_chars);
+                        }
+                        println!();
                         break;
                     }
                 }

@@ -170,7 +170,6 @@ generate_bash_block() {
 if [ "${GSH_ENABLED:-1}" != "0" ] && ! [ -S "/tmp/gsh-${USER}.sock" ]; then
     gsh-daemon start &>/dev/null 2>&1
 fi
-llm() { gsh "$@"; }
 BLOCK
     echo "$MARKER_END"
 }

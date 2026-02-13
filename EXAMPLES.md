@@ -339,9 +339,9 @@ Source the zsh plugin for seamless integration:
 # Add to ~/.zshrc
 source /path/to/gsh.plugin.zsh
 
-# Now use the `llm` command directly (alias for gsh)
-llm what does this error mean
-llm --flow code-review "check src/"
+# Now use gsh directly
+gsh what does this error mean
+gsh --flow code-review "check src/"
 ```
 
 The plugin registers three zsh hooks that fire automatically:

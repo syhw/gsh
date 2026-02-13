@@ -4,7 +4,7 @@
 # Use this for quick testing before running more complex flows.
 #
 # Usage:
-#   llm --flow simple-pub-test "Analyze the main.rs file and publish findings"
+#   gsh --flow simple-pub-test "Analyze the main.rs file and publish findings"
 
 [flow]
 name = "simple-pub-test"

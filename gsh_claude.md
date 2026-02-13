@@ -25,7 +25,7 @@
 │  │  │  zsh + gsh.plugin.zsh                                            │  │ │
 │  │  │  • Normal shell interaction                                       │  │ │
 │  │  │  • All I/O logged to context                                      │  │ │
-│  │  │  • "llm <prompt>" triggers agent                                  │  │ │
+│  │  │  • "gsh <prompt>" triggers agent                                  │  │ │
 │  │  └──────────────────────────────────────────────────────────────────┘  │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                    │                                         │
@@ -122,23 +122,10 @@ _gsh_send_event() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# COMMAND: llm - invoke the agentic assistant
+# COMMAND: gsh - invoke the agentic assistant
 # ═══════════════════════════════════════════════════════════════
-function llm() {
-    local prompt="$*"
-
-    if [[ -z "$prompt" ]]; then
-        # Interactive mode - open in current pane
-        gsh-cli chat
-    else
-        # Direct prompt mode
-        gsh-cli prompt "$prompt"
-    fi
-}
-
-# Alias for quick access
-alias ai='llm'
-alias gsh='gsh-cli'
+# gsh is installed as a binary in ~/.local/bin/gsh
+# No shell function needed — the binary handles all subcommands
 
 # ═══════════════════════════════════════════════════════════════
 # ZLE WIDGET: Ctrl+G to send current line to LLM
@@ -223,7 +210,7 @@ if [[ ! -S "$GSH_SOCKET" ]]; then
     sleep 0.5  # Give daemon time to start
 fi
 
-echo "gsh v$GSH_VERSION loaded. Use 'llm <prompt>' or Ctrl+G to invoke."
+echo "gsh v$GSH_VERSION loaded. Use 'gsh <prompt>' or Ctrl+G to invoke."
 ```
 
 ---
@@ -1747,7 +1734,7 @@ test auth::test_login ... FAILED
 ### Invoke Agent with Prompt
 
 ```bash
-$ llm help me fix the failing test
+$ gsh help me fix the failing test
 
 gsh> Analyzing your recent commands and test output...
 gsh> I see `cargo test` failed with an error in auth::test_login
@@ -1772,7 +1759,7 @@ gsh> Fixed! The test was checking the Result directly instead of using .is_ok()
 ### Background Agent
 
 ```bash
-$ llm --background explore how the authentication system works
+$ gsh --background explore how the authentication system works
 
 [gsh] Spawned agent gsh-agent-0012 (background)
 [gsh] Use 'tmux attach -t gsh-agent-0012' to observe
@@ -1799,7 +1786,7 @@ gsh> ...
 ### Python Execution (LLMVM-style)
 
 ```bash
-$ llm analyze the API response times from our logs
+$ gsh analyze the API response times from our logs
 
 gsh> I'll analyze the logs using Python for better data processing.
 
