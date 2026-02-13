@@ -336,13 +336,41 @@ async fn connect() -> Result<UnixStream> {
         })
 }
 
-/// Check if generation stats should be displayed.
-/// Shows when stderr is a terminal, or when GSH_STATS=1 is set.
-fn should_show_stats() -> bool {
-    if std::env::var("GSH_STATS").as_deref() == Ok("0") {
-        return false;
+/// Client output verbosity level.
+/// Controlled via GSH_VERBOSITY env var: "debug", "progress" (default), "none".
+/// Legacy GSH_STATS=0 is equivalent to "none", GSH_STATS=1 forces "progress".
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+enum Verbosity {
+    /// No bracket messages at all — just LLM text output
+    None = 0,
+    /// Tool use/result notifications, compaction, generation stats
+    Progress = 1,
+    /// Everything in Progress plus tool inputs, output previews, raw messages
+    Debug = 2,
+}
+
+fn get_verbosity() -> Verbosity {
+    // GSH_VERBOSITY takes priority
+    if let Ok(val) = std::env::var("GSH_VERBOSITY") {
+        return match val.to_lowercase().as_str() {
+            "none" | "quiet" | "0" => Verbosity::None,
+            "debug" | "verbose" | "2" => Verbosity::Debug,
+            _ => Verbosity::Progress,
+        };
     }
-    io::stderr().is_terminal() || std::env::var("GSH_STATS").as_deref() == Ok("1")
+    // Legacy GSH_STATS fallback
+    if let Ok(val) = std::env::var("GSH_STATS") {
+        return match val.as_str() {
+            "0" => Verbosity::None,
+            _ => Verbosity::Progress,
+        };
+    }
+    // Default: progress when stderr is a terminal, none otherwise
+    if io::stderr().is_terminal() {
+        Verbosity::Progress
+    } else {
+        Verbosity::None
+    }
 }
 
 /// Print generation timing stats (TTFT, tokens/sec) to stderr in dim text
@@ -411,12 +439,13 @@ async fn run_prompt(
 
     let mut line = String::new();
     let mut stdout = io::stdout();
-    let show_stats = should_show_stats();
+    let verbosity = get_verbosity();
 
     // Timing
     let start = Instant::now();
     let mut first_token_time: Option<std::time::Duration> = None;
     let mut total_chars: usize = 0;
+    let mut had_tool_use = false;
 
     loop {
         line.clear();
@@ -425,11 +454,21 @@ async fn run_prompt(
             break;
         }
 
-        let response: DaemonMessage = serde_json::from_str(line.trim())?;
+        let trimmed = line.trim();
+        if verbosity >= Verbosity::Debug {
+            eprintln!("\x1b[2m[recv] {}\x1b[0m", &trimmed[..trimmed.len().min(200)]);
+        }
+
+        let response: DaemonMessage = serde_json::from_str(trimmed)?;
 
         match response {
             DaemonMessage::TextChunk { text, done } => {
                 if !text.is_empty() {
+                    // Insert newline between text and tool output when tools ran silently
+                    if had_tool_use {
+                        println!();
+                        had_tool_use = false;
+                    }
                     if first_token_time.is_none() {
                         first_token_time = Some(start.elapsed());
                     }
@@ -439,25 +478,41 @@ async fn run_prompt(
                 }
                 if done {
                     println!();
-                    if show_stats {
+                    if verbosity >= Verbosity::Progress {
                         print_generation_stats(start, first_token_time, total_chars);
                     }
                     break;
                 }
             }
-            DaemonMessage::ToolUse { tool, input: _ } => {
-                eprintln!("\n[Using tool: {}]", tool);
+            DaemonMessage::ToolUse { tool, input } => {
+                had_tool_use = true;
+                if verbosity >= Verbosity::Progress {
+                    eprintln!("\x1b[2m[Using tool: {}]\x1b[0m", tool);
+                }
+                if verbosity >= Verbosity::Debug {
+                    let input_str = serde_json::to_string(&input).unwrap_or_default();
+                    let preview = &input_str[..input_str.len().min(500)];
+                    eprintln!("\x1b[2m[tool input: {}]\x1b[0m", preview);
+                }
             }
             DaemonMessage::ToolResult { tool, output, success } => {
-                let status = if success { "OK" } else { "FAILED" };
-                eprintln!("[Tool {} {}]", tool, status);
-                // Show error output when tool fails
-                if !success && !output.is_empty() {
+                if verbosity >= Verbosity::Progress {
+                    let status = if success { "OK" } else { "FAILED" };
+                    eprintln!("\x1b[2m[Tool {} {}]\x1b[0m", tool, status);
+                }
+                if !success && !output.is_empty() && verbosity >= Verbosity::Progress {
                     eprintln!("  Error: {}", output.lines().next().unwrap_or(&output));
+                }
+                if verbosity >= Verbosity::Debug && success && !output.is_empty() {
+                    let preview: String = output.lines().take(3).collect::<Vec<_>>().join("\n");
+                    eprintln!("\x1b[2m[tool output: {}{}]\x1b[0m", &preview[..preview.len().min(300)],
+                        if output.len() > 300 { "..." } else { "" });
                 }
             }
             DaemonMessage::Compacted { original_tokens, summary_tokens } => {
-                eprintln!("[context compacted: {} -> {} tokens]", original_tokens, summary_tokens);
+                if verbosity >= Verbosity::Progress {
+                    eprintln!("\x1b[2m[context compacted: {} -> {} tokens]\x1b[0m", original_tokens, summary_tokens);
+                }
             }
             DaemonMessage::Response { text, .. } => {
                 println!("{}", text);
@@ -513,7 +568,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
 
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let show_stats = should_show_stats();
+    let verbosity = get_verbosity();
 
     loop {
         print!("> ");
@@ -550,6 +605,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
         let msg_start = Instant::now();
         let mut first_token_time: Option<std::time::Duration> = None;
         let mut total_chars: usize = 0;
+        let mut had_tool_use = false;
 
         // Receive response
         loop {
@@ -559,11 +615,20 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                 break;
             }
 
-            let response: DaemonMessage = serde_json::from_str(line.trim())?;
+            let trimmed = line.trim();
+            if verbosity >= Verbosity::Debug {
+                eprintln!("\x1b[2m[recv] {}\x1b[0m", &trimmed[..trimmed.len().min(200)]);
+            }
+
+            let response: DaemonMessage = serde_json::from_str(trimmed)?;
 
             match response {
                 DaemonMessage::TextChunk { text, done } => {
                     if !text.is_empty() {
+                        if had_tool_use {
+                            println!();
+                            had_tool_use = false;
+                        }
                         if first_token_time.is_none() {
                             first_token_time = Some(msg_start.elapsed());
                         }
@@ -573,25 +638,42 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                     }
                     if done {
                         println!();
-                        if show_stats {
+                        if verbosity >= Verbosity::Progress {
                             print_generation_stats(msg_start, first_token_time, total_chars);
                         }
                         println!();
                         break;
                     }
                 }
-                DaemonMessage::ToolUse { tool, .. } => {
-                    eprintln!("\n[Using tool: {}]", tool);
+                DaemonMessage::ToolUse { tool, input } => {
+                    had_tool_use = true;
+                    if verbosity >= Verbosity::Progress {
+                        eprintln!("\x1b[2m[Using tool: {}]\x1b[0m", tool);
+                    }
+                    if verbosity >= Verbosity::Debug {
+                        let input_str = serde_json::to_string(&input).unwrap_or_default();
+                        let preview = &input_str[..input_str.len().min(500)];
+                        eprintln!("\x1b[2m[tool input: {}]\x1b[0m", preview);
+                    }
                 }
                 DaemonMessage::ToolResult { tool, output, success } => {
-                    let status = if success { "OK" } else { "FAILED" };
-                    eprintln!("[Tool {} {}]", tool, status);
-                    if !success && !output.is_empty() {
+                    if verbosity >= Verbosity::Progress {
+                        let status = if success { "OK" } else { "FAILED" };
+                        eprintln!("\x1b[2m[Tool {} {}]\x1b[0m", tool, status);
+                    }
+                    if !success && !output.is_empty() && verbosity >= Verbosity::Progress {
                         eprintln!("  Error: {}", output.lines().next().unwrap_or(&output));
+                    }
+                    if verbosity >= Verbosity::Debug && success && !output.is_empty() {
+                        let preview: String = output.lines().take(3).collect::<Vec<_>>().join("\n");
+                        eprintln!("\x1b[2m[tool output: {}{}]\x1b[0m", &preview[..preview.len().min(300)],
+                            if output.len() > 300 { "..." } else { "" });
                     }
                 }
                 DaemonMessage::Compacted { original_tokens, summary_tokens } => {
-                    eprintln!("[context compacted: {} -> {} tokens]", original_tokens, summary_tokens);
+                    if verbosity >= Verbosity::Progress {
+                        eprintln!("\x1b[2m[context compacted: {} -> {} tokens]\x1b[0m", original_tokens, summary_tokens);
+                    }
                 }
                 DaemonMessage::Error { message, .. } => {
                     eprintln!("Error: {}", message);
