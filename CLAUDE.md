@@ -200,6 +200,7 @@ Example exchange:
 - `GSH_SOCKET` - Override socket path (default: `/tmp/gsh-$USER.sock`)
 - `GSH_ENABLED` - Set to `0` to disable context tracking in shell
 - `GSH_QUIET` - Set to `1` to suppress plugin load message
+- `GSH_VERBOSITY` - CLI output verbosity: `none`, `progress` (default), `debug`
 
 ## Current Work
 
