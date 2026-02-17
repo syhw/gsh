@@ -47,6 +47,10 @@ pub struct LlmConfig {
     pub zhipu: ZhipuConfig,
     #[serde(default)]
     pub together: TogetherConfig,
+    #[serde(default)]
+    pub mistral: MistralConfig,
+    #[serde(default)]
+    pub cerebras: CerebrasConfig,
     /// Maximum tokens in response
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -146,6 +150,48 @@ impl Default for TogetherConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MistralConfig {
+    /// API key (can also use MISTRAL_API_KEY env var)
+    pub api_key: Option<String>,
+    /// Model to use
+    #[serde(default = "default_mistral_model")]
+    pub model: String,
+    /// Base URL
+    pub base_url: Option<String>,
+}
+
+impl Default for MistralConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            model: default_mistral_model(),
+            base_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CerebrasConfig {
+    /// API key (can also use CEREBRAS_API_KEY env var)
+    pub api_key: Option<String>,
+    /// Model to use
+    #[serde(default = "default_cerebras_model")]
+    pub model: String,
+    /// Base URL
+    pub base_url: Option<String>,
+}
+
+impl Default for CerebrasConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            model: default_cerebras_model(),
+            base_url: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     /// Maximum number of shell events to keep
     #[serde(default = "default_max_events")]
@@ -239,6 +285,14 @@ fn default_zhipu_model() -> String {
 
 fn default_together_model() -> String {
     "moonshotai/Kimi-K2.5".to_string()
+}
+
+fn default_mistral_model() -> String {
+    "devstral-small-latest".to_string()
+}
+
+fn default_cerebras_model() -> String {
+    "zai-glm-4.7".to_string()
 }
 
 fn default_max_events() -> usize {
@@ -360,6 +414,8 @@ impl Default for LlmConfig {
             ollama: OllamaConfig::default(),
             zhipu: ZhipuConfig::default(),
             together: TogetherConfig::default(),
+            mistral: MistralConfig::default(),
+            cerebras: CerebrasConfig::default(),
             max_tokens: default_max_tokens(),
             system_prompt: None,
         }
@@ -444,49 +500,53 @@ impl Config {
         })
     }
 
-    /// Get API key for Anthropic (config or env var)
+    /// Get API key for Anthropic (env var takes priority over config)
     pub fn anthropic_api_key(&self) -> Option<String> {
-        self.llm
-            .anthropic
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+        std::env::var("ANTHROPIC_API_KEY")
+            .ok()
+            .or_else(|| self.llm.anthropic.api_key.clone())
     }
 
-    /// Get API key for OpenAI (config or env var)
+    /// Get API key for OpenAI (env var takes priority over config)
     pub fn openai_api_key(&self) -> Option<String> {
-        self.llm
-            .openai
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .or_else(|| self.llm.openai.api_key.clone())
     }
 
-    /// Get API key for Moonshot (config or env var)
+    /// Get API key for Moonshot (env var takes priority over config)
     pub fn moonshot_api_key(&self) -> Option<String> {
-        self.llm
-            .moonshot
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("MOONSHOT_API_KEY").ok())
+        std::env::var("MOONSHOT_API_KEY")
+            .ok()
+            .or_else(|| self.llm.moonshot.api_key.clone())
     }
 
-    /// Get API key for Zhipu (config or env var)
+    /// Get API key for Zhipu (env var takes priority over config)
     pub fn zhipu_api_key(&self) -> Option<String> {
-        self.llm
-            .zhipu
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("ZAI_API_KEY").ok())
+        std::env::var("ZAI_API_KEY")
+            .ok()
+            .or_else(|| self.llm.zhipu.api_key.clone())
     }
 
-    /// Get API key for Together.AI (config or env var)
+    /// Get API key for Together.AI (env var takes priority over config)
     pub fn together_api_key(&self) -> Option<String> {
-        self.llm
-            .together
-            .api_key
-            .clone()
-            .or_else(|| std::env::var("TOGETHER_API_KEY").ok())
+        std::env::var("TOGETHER_API_KEY")
+            .ok()
+            .or_else(|| self.llm.together.api_key.clone())
+    }
+
+    /// Get API key for Mistral (env var takes priority over config)
+    pub fn mistral_api_key(&self) -> Option<String> {
+        std::env::var("MISTRAL_API_KEY")
+            .ok()
+            .or_else(|| self.llm.mistral.api_key.clone())
+    }
+
+    /// Get API key for Cerebras (env var takes priority over config)
+    pub fn cerebras_api_key(&self) -> Option<String> {
+        std::env::var("CEREBRAS_API_KEY")
+            .ok()
+            .or_else(|| self.llm.cerebras.api_key.clone())
     }
 
     /// Get the session storage directory

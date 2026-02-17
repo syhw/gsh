@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod moonshot;
 pub mod ollama;
 pub mod openai;
+pub mod openai_responses;
 pub mod together;
 pub mod zhipu;
 
@@ -443,6 +444,12 @@ pub trait Provider: Send + Sync {
     }
 }
 
+/// Check if a model requires the OpenAI Responses API instead of Chat Completions.
+fn uses_responses_api(model: &str) -> bool {
+    let m = model.to_lowercase();
+    m.contains("codex") || m.starts_with("gpt-5")
+}
+
 /// Create a provider from configuration
 pub fn create_provider(
     provider_name: &str,
@@ -462,11 +469,20 @@ pub fn create_provider(
             let api_key = config
                 .openai_api_key()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI API key not configured"))?;
-            Ok(Box::new(openai::OpenAIProvider::new(
-                api_key,
-                config.llm.openai.model.clone(),
-                config.llm.openai.base_url.clone(),
-            )))
+            let model = config.llm.openai.model.clone();
+            if uses_responses_api(&model) {
+                Ok(Box::new(openai_responses::OpenAIResponsesProvider::new(
+                    api_key,
+                    model,
+                    None, // Always use default Responses API URL
+                )))
+            } else {
+                Ok(Box::new(openai::OpenAIProvider::new(
+                    api_key,
+                    model,
+                    config.llm.openai.base_url.clone(),
+                )))
+            }
         }
         "moonshot" | "kimi" => {
             let api_key = config
@@ -504,6 +520,30 @@ pub fn create_provider(
                 config.llm.together.base_url.clone(),
             )))
         }
+        "mistral" => {
+            let api_key = config
+                .mistral_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Mistral API key not configured (set MISTRAL_API_KEY)"))?;
+            let base_url = config.llm.mistral.base_url.clone()
+                .unwrap_or_else(|| "https://api.mistral.ai/v1/chat/completions".to_string());
+            Ok(Box::new(openai::OpenAIProvider::new(
+                api_key,
+                config.llm.mistral.model.clone(),
+                Some(base_url),
+            )))
+        }
+        "cerebras" => {
+            let api_key = config
+                .cerebras_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Cerebras API key not configured (set CEREBRAS_API_KEY)"))?;
+            let base_url = config.llm.cerebras.base_url.clone()
+                .unwrap_or_else(|| "https://api.cerebras.ai/v1/chat/completions".to_string());
+            Ok(Box::new(openai::OpenAIProvider::new(
+                api_key,
+                config.llm.cerebras.model.clone(),
+                Some(base_url),
+            )))
+        }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),
     }
 }
@@ -528,11 +568,19 @@ pub fn create_provider_with_model(
             let api_key = config
                 .openai_api_key()
                 .ok_or_else(|| anyhow::anyhow!("OpenAI API key not configured"))?;
-            Ok(Box::new(openai::OpenAIProvider::new(
-                api_key,
-                model.to_string(),
-                config.llm.openai.base_url.clone(),
-            )))
+            if uses_responses_api(model) {
+                Ok(Box::new(openai_responses::OpenAIResponsesProvider::new(
+                    api_key,
+                    model.to_string(),
+                    None,
+                )))
+            } else {
+                Ok(Box::new(openai::OpenAIProvider::new(
+                    api_key,
+                    model.to_string(),
+                    config.llm.openai.base_url.clone(),
+                )))
+            }
         }
         "moonshot" | "kimi" => {
             let api_key = config
@@ -568,6 +616,30 @@ pub fn create_provider_with_model(
                 api_key,
                 model.to_string(),
                 config.llm.together.base_url.clone(),
+            )))
+        }
+        "mistral" => {
+            let api_key = config
+                .mistral_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Mistral API key not configured (set MISTRAL_API_KEY)"))?;
+            let base_url = config.llm.mistral.base_url.clone()
+                .unwrap_or_else(|| "https://api.mistral.ai/v1/chat/completions".to_string());
+            Ok(Box::new(openai::OpenAIProvider::new(
+                api_key,
+                model.to_string(),
+                Some(base_url),
+            )))
+        }
+        "cerebras" => {
+            let api_key = config
+                .cerebras_api_key()
+                .ok_or_else(|| anyhow::anyhow!("Cerebras API key not configured (set CEREBRAS_API_KEY)"))?;
+            let base_url = config.llm.cerebras.base_url.clone()
+                .unwrap_or_else(|| "https://api.cerebras.ai/v1/chat/completions".to_string());
+            Ok(Box::new(openai::OpenAIProvider::new(
+                api_key,
+                model.to_string(),
+                Some(base_url),
             )))
         }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),

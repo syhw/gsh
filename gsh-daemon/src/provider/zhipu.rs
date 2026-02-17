@@ -34,6 +34,20 @@ impl ZhipuProvider {
             base_url: base_url.unwrap_or_else(|| DEFAULT_API_URL.to_string()),
         }
     }
+
+    /// Check if this model supports the thinking/reasoning parameter
+    fn supports_thinking(&self) -> bool {
+        let m = self.model.to_lowercase();
+        m.contains("glm-5") || m.contains("glm5")
+    }
+
+    fn thinking_param(&self) -> Option<ZhipuThinking> {
+        if self.supports_thinking() {
+            Some(ZhipuThinking { thinking_type: "enabled".to_string() })
+        } else {
+            None
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -74,6 +88,15 @@ struct ZhipuRequest {
     /// Request usage stats in the final streaming chunk
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<ZhipuStreamOptions>,
+    /// Enable thinking/reasoning for models that support it (e.g., GLM-5)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ZhipuThinking>,
+}
+
+#[derive(Debug, Serialize)]
+struct ZhipuThinking {
+    #[serde(rename = "type")]
+    thinking_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -397,14 +420,16 @@ impl Provider for ZhipuProvider {
         tools: Option<&[ToolDefinition]>,
         max_tokens: u32,
     ) -> Result<ChatResponse> {
+        let thinking = self.thinking_param();
         let request = ZhipuRequest {
             model: self.model.clone(),
             messages: convert_messages(&messages, system),
             max_tokens: Some(max_tokens),
             tools: tools.map(convert_tools),
             stream: None,
-            temperature: Some(0.7),
+            temperature: if thinking.is_some() { Some(1.0) } else { Some(0.7) },
             stream_options: None,
+            thinking,
         };
 
         let response = self
@@ -483,14 +508,16 @@ impl Provider for ZhipuProvider {
         tools: Option<&[ToolDefinition]>,
         max_tokens: u32,
     ) -> Result<Pin<Box<dyn Stream<Item = StreamEvent> + Send>>> {
+        let thinking = self.thinking_param();
         let request = ZhipuRequest {
             model: self.model.clone(),
             messages: convert_messages(&messages, system),
             max_tokens: Some(max_tokens),
             tools: tools.map(convert_tools),
             stream: Some(true),
-            temperature: Some(0.7),
+            temperature: if thinking.is_some() { Some(1.0) } else { Some(0.7) },
             stream_options: Some(ZhipuStreamOptions { include_usage: true }),
+            thinking,
         };
 
         let response = self
