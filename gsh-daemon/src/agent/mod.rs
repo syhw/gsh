@@ -50,6 +50,8 @@ pub enum AgentEvent {
     Error(String),
     /// Context was compacted (summarized to save space)
     Compacted { summary_tokens: usize, original_tokens: usize },
+    /// Agent is about to call the LLM (waiting for first token)
+    Thinking,
 }
 
 // ============================================================================
@@ -458,6 +460,9 @@ Guidelines:
                 iteration,
                 max_iterations: self.max_iterations,
             });
+            // Signal that we're about to call the LLM
+            let _ = event_tx.send(AgentEvent::Thinking).await;
+
             // Call the LLM with streaming
             let stream_result = self
                 .provider

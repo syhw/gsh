@@ -404,6 +404,9 @@ async fn process_message(
                     agent::AgentEvent::Compacted { summary_tokens, original_tokens } => {
                         Some(DaemonMessage::Compacted { original_tokens, summary_tokens })
                     }
+                    agent::AgentEvent::Thinking => {
+                        Some(DaemonMessage::Thinking)
+                    }
                     agent::AgentEvent::Error(e) => {
                         had_error = true;
                         Some(DaemonMessage::Error { message: e, code: None })
@@ -568,6 +571,9 @@ async fn process_message(
                     }
                     agent::AgentEvent::Compacted { summary_tokens, original_tokens } => {
                         Some(DaemonMessage::Compacted { original_tokens, summary_tokens })
+                    }
+                    agent::AgentEvent::Thinking => {
+                        Some(DaemonMessage::Thinking)
                     }
                     agent::AgentEvent::Error(e) => {
                         Some(DaemonMessage::Error { message: e, code: None })

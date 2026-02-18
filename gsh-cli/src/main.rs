@@ -4,9 +4,12 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::task::JoinHandle;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -153,6 +156,7 @@ enum DaemonMessage {
     SessionList { sessions: Vec<SessionInfo> },
     SessionDeleted { session_id: String },
     Compacted { original_tokens: usize, summary_tokens: usize },
+    Thinking,
     ShuttingDown,
 }
 
@@ -373,6 +377,51 @@ fn get_verbosity() -> Verbosity {
     }
 }
 
+/// Braille spinner that runs on a background tokio task, writing to stderr.
+struct Spinner {
+    stop: Arc<AtomicBool>,
+    message: Arc<Mutex<String>>,
+    handle: JoinHandle<()>,
+}
+
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+impl Spinner {
+    fn start(msg: &str) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let message = Arc::new(Mutex::new(msg.to_string()));
+        let stop_clone = stop.clone();
+        let message_clone = message.clone();
+
+        let handle = tokio::spawn(async move {
+            let mut i = 0usize;
+            let mut stderr = io::stderr();
+            while !stop_clone.load(Ordering::Relaxed) {
+                let frame = SPINNER_FRAMES[i % SPINNER_FRAMES.len()];
+                let msg = message_clone.lock().unwrap().clone();
+                let _ = write!(stderr, "\r\x1b[2m{} {}\x1b[0m\x1b[K", frame, msg);
+                let _ = stderr.flush();
+                i += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            }
+            // Clear the spinner line
+            let _ = write!(stderr, "\r\x1b[K");
+            let _ = stderr.flush();
+        });
+
+        Self { stop, message, handle }
+    }
+
+    fn set_message(&self, msg: &str) {
+        *self.message.lock().unwrap() = msg.to_string();
+    }
+
+    async fn stop(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let _ = self.handle.await;
+    }
+}
+
 /// Print generation timing stats (TTFT, tokens/sec) to stderr in dim text
 fn print_generation_stats(
     start: Instant,
@@ -441,6 +490,13 @@ async fn run_prompt(
     let mut stdout = io::stdout();
     let verbosity = get_verbosity();
 
+    // Start spinner for context packing phase
+    let mut spinner: Option<Spinner> = if verbosity >= Verbosity::Progress {
+        Some(Spinner::start("Packing context..."))
+    } else {
+        None
+    };
+
     // Timing
     let start = Instant::now();
     let mut first_token_time: Option<std::time::Duration> = None;
@@ -451,6 +507,7 @@ async fn run_prompt(
         line.clear();
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
+            if let Some(s) = spinner.take() { s.stop().await; }
             break;
         }
 
@@ -462,8 +519,14 @@ async fn run_prompt(
         let response: DaemonMessage = serde_json::from_str(trimmed)?;
 
         match response {
+            DaemonMessage::Thinking => {
+                if let Some(ref s) = spinner {
+                    s.set_message("Thinking...");
+                }
+            }
             DaemonMessage::TextChunk { text, done } => {
                 if !text.is_empty() {
+                    if let Some(s) = spinner.take() { s.stop().await; }
                     // Insert newline between text and tool output when tools ran silently
                     if had_tool_use {
                         println!();
@@ -477,6 +540,7 @@ async fn run_prompt(
                     stdout.flush()?;
                 }
                 if done {
+                    if let Some(s) = spinner.take() { s.stop().await; }
                     println!();
                     if verbosity >= Verbosity::Progress {
                         print_generation_stats(start, first_token_time, total_chars);
@@ -485,6 +549,7 @@ async fn run_prompt(
                 }
             }
             DaemonMessage::ToolUse { tool, input } => {
+                if let Some(s) = spinner.take() { s.stop().await; }
                 had_tool_use = true;
                 if verbosity >= Verbosity::Progress {
                     eprintln!("\x1b[2m[Using tool: {}]\x1b[0m", tool);
@@ -515,10 +580,12 @@ async fn run_prompt(
                 }
             }
             DaemonMessage::Response { text, .. } => {
+                if let Some(s) = spinner.take() { s.stop().await; }
                 println!("{}", text);
                 break;
             }
             DaemonMessage::Error { message, .. } => {
+                if let Some(s) = spinner.take() { s.stop().await; }
                 eprintln!("Error: {}", message);
                 break;
             }
@@ -601,6 +668,13 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
         let msg_str = serde_json::to_string(&msg)? + "\n";
         writer.write_all(msg_str.as_bytes()).await?;
 
+        // Start spinner for context packing phase
+        let mut spinner: Option<Spinner> = if verbosity >= Verbosity::Progress {
+            Some(Spinner::start("Packing context..."))
+        } else {
+            None
+        };
+
         // Timing for this exchange
         let msg_start = Instant::now();
         let mut first_token_time: Option<std::time::Duration> = None;
@@ -612,6 +686,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
             line.clear();
             let n = reader.read_line(&mut line).await?;
             if n == 0 {
+                if let Some(s) = spinner.take() { s.stop().await; }
                 break;
             }
 
@@ -623,8 +698,14 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
             let response: DaemonMessage = serde_json::from_str(trimmed)?;
 
             match response {
+                DaemonMessage::Thinking => {
+                    if let Some(ref s) = spinner {
+                        s.set_message("Thinking...");
+                    }
+                }
                 DaemonMessage::TextChunk { text, done } => {
                     if !text.is_empty() {
+                        if let Some(s) = spinner.take() { s.stop().await; }
                         if had_tool_use {
                             println!();
                             had_tool_use = false;
@@ -637,6 +718,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                         stdout.flush()?;
                     }
                     if done {
+                        if let Some(s) = spinner.take() { s.stop().await; }
                         println!();
                         if verbosity >= Verbosity::Progress {
                             print_generation_stats(msg_start, first_token_time, total_chars);
@@ -646,6 +728,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                     }
                 }
                 DaemonMessage::ToolUse { tool, input } => {
+                    if let Some(s) = spinner.take() { s.stop().await; }
                     had_tool_use = true;
                     if verbosity >= Verbosity::Progress {
                         eprintln!("\x1b[2m[Using tool: {}]\x1b[0m", tool);
@@ -676,6 +759,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                     }
                 }
                 DaemonMessage::Error { message, .. } => {
+                    if let Some(s) = spinner.take() { s.stop().await; }
                     eprintln!("Error: {}", message);
                     break;
                 }

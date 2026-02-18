@@ -256,7 +256,7 @@ fn default_log_level() -> String {
 }
 
 fn default_provider() -> String {
-    "anthropic".to_string()
+    "zai".to_string()
 }
 
 fn default_max_tokens() -> u32 {
@@ -280,7 +280,7 @@ fn default_ollama_model() -> String {
 }
 
 fn default_zhipu_model() -> String {
-    "GLM-4.7".to_string()
+    "glm-5".to_string()
 }
 
 fn default_together_model() -> String {
@@ -521,11 +521,10 @@ impl Config {
             .or_else(|| self.llm.moonshot.api_key.clone())
     }
 
-    /// Get API key for Zhipu (env var takes priority over config)
+    /// Get API key for Zhipu (config takes priority, falls back to env var)
     pub fn zhipu_api_key(&self) -> Option<String> {
-        std::env::var("ZAI_API_KEY")
-            .ok()
-            .or_else(|| self.llm.zhipu.api_key.clone())
+        self.llm.zhipu.api_key.clone()
+            .or_else(|| std::env::var("ZAI_API_KEY").ok())
     }
 
     /// Get API key for Together.AI (env var takes priority over config)

@@ -152,6 +152,8 @@ pub enum DaemonMessage {
         original_tokens: usize,
         summary_tokens: usize,
     },
+    /// Agent is calling the LLM (waiting for first token)
+    Thinking,
     /// Shutdown acknowledgment
     ShuttingDown,
 }
