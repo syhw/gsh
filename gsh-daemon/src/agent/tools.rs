@@ -605,9 +605,10 @@ impl ToolExecutor {
             "sessions" => {
                 let keyword = query.unwrap_or("");
                 if keyword.is_empty() {
-                    anyhow::bail!("'query' is required when searching sessions");
+                    retriever.list_recent_sessions(last_n.min(10))
+                } else {
+                    retriever.search_sessions(keyword, last_n.min(10))
                 }
-                retriever.search_sessions(keyword, last_n.min(10))
             }
             "logs" => {
                 let event_type = input["event_type"].as_str();
@@ -699,15 +700,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_exec_search_context_sessions_requires_query() {
+    async fn test_exec_search_context_sessions_without_query_lists_recent() {
         let tmp = TempDir::new().unwrap();
         let executor = make_executor(&tmp);
 
         let result = executor.exec_search_context(&json!({
             "source": "sessions"
-        })).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("query"));
+        })).await.unwrap();
+        assert!(result.contains("No saved sessions") || result.contains("Recent Sessions"));
     }
 
     #[tokio::test]

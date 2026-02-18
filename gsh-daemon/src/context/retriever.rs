@@ -53,6 +53,24 @@ impl ContextRetriever {
         Ok(output)
     }
 
+    /// List recent sessions (no keyword filter)
+    pub fn list_recent_sessions(&self, limit: usize) -> Result<String> {
+        let limit = limit.min(10);
+        let sessions = session::list_sessions(&self.session_dir)?;
+
+        if sessions.is_empty() {
+            return Ok("No saved sessions found.".to_string());
+        }
+
+        let mut output = format!("# Recent Sessions ({} total)\n\n", sessions.len());
+        for info in sessions.iter().take(limit) {
+            let title = info.title.as_deref().unwrap_or("(untitled)");
+            let date = info.last_activity.format("%Y-%m-%d %H:%M");
+            output.push_str(&format!("- {} ({}) | {} msgs | {}\n", title, date, info.message_count, info.cwd));
+        }
+        Ok(output)
+    }
+
     /// Search past agent sessions by keyword
     pub fn search_sessions(
         &self,

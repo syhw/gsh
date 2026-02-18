@@ -550,6 +550,9 @@ async fn run_prompt(
             }
             DaemonMessage::ToolUse { tool, input } => {
                 if let Some(s) = spinner.take() { s.stop().await; }
+                if total_chars > 0 && !had_tool_use {
+                    println!(); // newline between streamed text and tool messages
+                }
                 had_tool_use = true;
                 if verbosity >= Verbosity::Progress {
                     eprintln!("\x1b[2m[Using tool: {}]\x1b[0m", tool);
@@ -586,6 +589,7 @@ async fn run_prompt(
             }
             DaemonMessage::Error { message, .. } => {
                 if let Some(s) = spinner.take() { s.stop().await; }
+                if total_chars > 0 { println!(); }
                 eprintln!("Error: {}", message);
                 break;
             }
@@ -729,6 +733,9 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                 }
                 DaemonMessage::ToolUse { tool, input } => {
                     if let Some(s) = spinner.take() { s.stop().await; }
+                    if total_chars > 0 && !had_tool_use {
+                        println!(); // newline between streamed text and tool messages
+                    }
                     had_tool_use = true;
                     if verbosity >= Verbosity::Progress {
                         eprintln!("\x1b[2m[Using tool: {}]\x1b[0m", tool);
@@ -760,6 +767,7 @@ async fn run_chat(session_id: Option<String>) -> Result<()> {
                 }
                 DaemonMessage::Error { message, .. } => {
                     if let Some(s) = spinner.take() { s.stop().await; }
+                    if total_chars > 0 { println!(); }
                     eprintln!("Error: {}", message);
                     break;
                 }

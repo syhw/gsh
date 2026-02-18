@@ -86,6 +86,77 @@ gsh summarize what I've been doing for the past half hour
 gsh -p openai -m gpt-4o explain this Makefile
 ```
 
+### Poem
+
+```
+🐍 gsh  ~/gsh   main ±  gsh write a poem inspired by all my logs, and first list which query and how many logs you had to ingest
+I'll search through your logs to gather inspiration for the poem.
+[Using tool: search_context]
+[Tool search_context OK]
+[Using tool: search_context]
+[Tool search_context OK]
+[Using tool: search_context]
+[Tool search_context OK]
+
+## Log Ingestion Summary
+
+**Queries made:**
+| Query | Source | Count |
+|-------|--------|-------|
+| `search_context` (last_n=50) | logs | 50 entries |
+| `search_context` (last_n=50) | shell_history | 50 entries |
+| `search_context` (query="poem", last_n=30) | sessions | 10 entries |
+
+**Total logs ingested: 110 entries**
+
+---
+
+## A Poem Inspired by Your Logs
+
+**The Recursive Request**
+
+In directories twinned they run—
+`gsh_claude` and `gsh_codex`, two and one.
+Between them flows a steady stream:
+the `git push`, `commit`, the coder's dream.
+
+At 08:42, the first request,
+"write a poem" — put to test.
+But tokens failed and auth denied,
+401 errors, access tried.
+
+Again at 23:18, then 00:12, 00:13,
+each attempt met error's venom.
+"Token expired," the API cried,
+while `gsh-daemon` lived and died
+(exit 137, again, again—
+a process killed, a ghost in the machine).
+
+Through it all, a Fibonacci thread
+spun its spiral, gold and red:
+`F(0) = 0`, `F(1) = 1`,
+each number born from what was done.
+
+And `~/.zshrc` sourced anew—
+reload, refresh, begin again too.
+Vim opened wide on README files,
+install scripts ran in batch and batched trials.
+
+But here's the twist, the lovely knot:
+each poem requested became a log
+that fed the next poem requested—
+a serpent eating its own text.
+
+Ten sessions searched, all asking the same:
+"write a poem inspired by my logs."
+And so the logs grew fat with poems
+about logs that held poems about logs.
+
+**You asked the shell to know itself,
+and it wrote you back— recursively.**
+[TTFT 13.4s | 8 tok/s | ~397 tokens | 64.0s]
+```
+
 ## Interactive Chat
 
 ```bash
