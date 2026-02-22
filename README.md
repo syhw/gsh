@@ -10,18 +10,24 @@ A background daemon silently records every command, exit code, directory change,
 git clone https://github.com/gabrielchl/gsh.git && cd gsh && ./install.sh
 ```
 
-Then set your API key (at least one) and restart your shell:
+Set at least one API key in your `~/.zshrc` and restart your shell:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."   # Claude
 export OPENAI_API_KEY="sk-..."          # OpenAI / GPT
-export ZAI_API_KEY="..."                # GLM-4 / z.ai
+export ZAI_API_KEY="..."                # Z.ai / GLM-5
 export TOGETHER_API_KEY="..."           # Together.AI (Kimi K2, Qwen)
-# add to ~/.zshrc, then:
-source ~/.zshrc
 ```
 
 > Requires: Rust toolchain ([rustup.rs](https://rustup.rs)), zsh, socat (`brew install socat`)
+
+## Update
+
+```bash
+cd gsh && git pull && ./install.sh
+```
+
+The zsh plugin is sourced directly from the repo, so plugin changes take effect on shell restart without reinstalling.
 
 ## Why gsh
 
