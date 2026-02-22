@@ -3,6 +3,7 @@ pub mod moonshot;
 pub mod ollama;
 pub mod openai;
 pub mod openai_responses;
+pub mod rig_adapt;
 pub mod together;
 pub mod zhipu;
 

@@ -25,3 +25,5 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 async-trait = "0.1"
+rig-core = "0.29"
+async-stream = "0.3"

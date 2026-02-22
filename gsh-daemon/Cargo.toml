@@ -27,6 +27,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 futures.workspace = true
 async-trait.workspace = true
+rig-core.workspace = true
+async-stream.workspace = true
 
 tokio-stream = "0.1"
 futures-util = "0.3"
