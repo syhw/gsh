@@ -32,8 +32,6 @@ pub struct Session {
     pub messages: Vec<ChatMessage>,
     /// Append-only writer for the JSONL file
     writer: Option<BufWriter<File>>,
-    /// Directory where session files are stored
-    session_dir: PathBuf,
 }
 
 impl Session {
@@ -79,7 +77,6 @@ impl Session {
             metadata,
             messages: Vec::new(),
             writer: Some(writer),
-            session_dir,
         })
     }
 
@@ -165,7 +162,6 @@ impl Session {
             metadata,
             messages,
             writer: Some(writer),
-            session_dir,
         })
     }
 
@@ -209,34 +205,6 @@ impl Session {
         self.writer = None;
     }
 
-    /// Rewrite the metadata line (first line of the file)
-    #[allow(dead_code)]
-    pub fn save_metadata(&self) -> Result<()> {
-        let file_path = self.session_dir.join(format!("{}.jsonl", self.metadata.id));
-        if !file_path.exists() {
-            return Ok(());
-        }
-
-        // Read all lines
-        let content = fs::read_to_string(&file_path)?;
-        let mut lines: Vec<&str> = content.lines().collect();
-
-        if lines.is_empty() {
-            return Ok(());
-        }
-
-        // Replace first line with updated metadata
-        let meta_json = serde_json::to_string(&self.metadata)?;
-        lines[0] = &meta_json;
-
-        // Rewrite file
-        let mut file = File::create(&file_path)?;
-        for line in &lines {
-            writeln!(file, "{}", line)?;
-        }
-
-        Ok(())
-    }
 }
 
 impl Drop for Session {

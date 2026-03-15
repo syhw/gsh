@@ -1,4 +1,5 @@
 pub mod anthropic;
+pub mod deepseek;
 pub mod moonshot;
 pub mod ollama;
 pub mod openai;
@@ -545,6 +546,15 @@ pub fn create_provider(
                 Some(base_url),
             )))
         }
+        "deepseek" => {
+            let api_key = config
+                .deepseek_api_key()
+                .ok_or_else(|| anyhow::anyhow!("DeepSeek API key not configured (set DEEPSEEK_API_KEY)"))?;
+            Ok(Box::new(deepseek::DeepSeekProvider::new(
+                api_key,
+                config.llm.deepseek.model.clone(),
+            )))
+        }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),
     }
 }
@@ -641,6 +651,15 @@ pub fn create_provider_with_model(
                 api_key,
                 model.to_string(),
                 Some(base_url),
+            )))
+        }
+        "deepseek" => {
+            let api_key = config
+                .deepseek_api_key()
+                .ok_or_else(|| anyhow::anyhow!("DeepSeek API key not configured (set DEEPSEEK_API_KEY)"))?;
+            Ok(Box::new(deepseek::DeepSeekProvider::new(
+                api_key,
+                model.to_string(),
             )))
         }
         _ => Err(anyhow::anyhow!("Unknown provider: {}", provider_name)),

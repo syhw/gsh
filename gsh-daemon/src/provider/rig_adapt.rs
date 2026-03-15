@@ -156,7 +156,7 @@ pub fn build_request(
     };
 
     CompletionRequest {
-        preamble: system.map(|s| s.to_string()),
+        preamble: system.filter(|s| !s.is_empty()).map(|s| s.to_string()),
         chat_history,
         documents: Vec::new(),
         tools: rig_tools,

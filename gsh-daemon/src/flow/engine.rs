@@ -102,15 +102,6 @@ pub enum FlowEvent {
     },
 }
 
-/// Result of a single node execution
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct NodeResult {
-    pub node_id: String,
-    pub output: String,
-    pub success: bool,
-}
-
 /// Context passed between nodes in a flow
 #[derive(Debug, Clone, Default)]
 pub struct FlowContext {
@@ -211,18 +202,6 @@ impl FlowEngine {
     /// Get the publication store (if in publication mode)
     pub fn publication_store(&self) -> Option<Arc<PublicationStore>> {
         self.publication_store.clone()
-    }
-
-    /// Set provider override for a specific node
-    #[allow(dead_code)]
-    pub fn set_node_provider(&mut self, node_id: &str, provider: &str) {
-        self.provider_overrides.insert(node_id.to_string(), provider.to_string());
-    }
-
-    /// Set model override for a specific node
-    #[allow(dead_code)]
-    pub fn set_node_model(&mut self, node_id: &str, model: &str) {
-        self.model_overrides.insert(node_id.to_string(), model.to_string());
     }
 
     /// Resolve role for a node

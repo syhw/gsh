@@ -489,8 +489,24 @@ Guidelines:
             let mut current_tool_input = String::new();
             let mut current_tool_idx: Option<usize> = None;
 
-            // Process the stream
-            while let Some(event) = stream.next().await {
+            // Process the stream with a per-chunk timeout to prevent infinite hangs.
+            // 60s between chunks is generous for any LLM but catches dead connections.
+            loop {
+                let chunk = tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    stream.next(),
+                )
+                .await;
+                let event = match chunk {
+                    Err(_) => {
+                        let error_msg = "Stream timeout: no data received for 60s";
+                        self.log_event(EventKind::error(error_msg, Some(false)));
+                        let _ = event_tx.send(AgentEvent::Error(error_msg.to_string())).await;
+                        anyhow::bail!("{}", error_msg);
+                    }
+                    Ok(None) => break, // stream ended normally
+                    Ok(Some(ev)) => ev,
+                };
                 match event {
                     StreamEvent::TextDelta(text) => {
                         response_text.push_str(&text);

@@ -1,0 +1,51 @@
+# Phase 4: Publication Coordination (Partially Complete)
+
+## Completed
+- `CoordinationMode` enum (Simple, Publication) in `flow/mod.rs`
+- `PublicationStore` with Publication, Review, Grade types in `flow/publication.rs`
+- Publication tools (publish, cite, review, search_publications, etc.) in `flow/pub_tools.rs`
+- `CustomToolHandler` trait in `agent/mod.rs` for extensible tool handlers
+- Integration of custom handlers into Agent's tool execution flow
+- Flow events for publication mode (PublicationCreated, PublicationReviewed, PublicationConsensus)
+- Zhipu provider streaming bug fixed (VecDeque event queue + unified `process_sse_data` helper)
+- Consensus aggregation logic in flow engine:
+  - PubSnapshot diffing: captures store state before/after each node, emits events
+  - PublicationCreated, PublicationReviewed, PublicationConsensus events now emitted
+  - `allow_self_review` threaded from coordination config to PublicationStore
+  - `review_from` node field injects publications from specified nodes into agent prompt
+  - Fixed hardcoded consensus threshold in pub_tools.rs (uses store.consensus_threshold())
+- Publication flow tested end-to-end
+
+## Remaining Work
+- Add agent memory/evolution (self-editing prompts)
+- Citation tracking between agent outputs
+
+---
+
+# Tmux Cleanup on Shutdown
+
+## Completed
+- `TmuxManager::cleanup_all_sessions()` returns `Vec<String>` (session names)
+- Shutdown handler in `main.rs` displays: `Killed N tmux session(s): session1, session2, ...`
+- Ctrl+C signal handler cleans up tmux sessions before exit
+
+---
+
+# Other TODOs
+
+## Provider Support
+- [x] DeepSeek provider (v3, R1 reasoning) — `--provider deepseek`, env: DEEPSEEK_API_KEY
+- [ ] Fix Ollama provider tool use (if supported by model)
+
+## Observability
+- [x] JSONL structured logging
+- [x] Token usage tracking
+- [ ] Cost estimation per agent/flow
+- [ ] Web dashboard (future - currently TUI only)
+
+## Flow Engine
+- [x] Sequential execution
+- [x] Conditional routing
+- [x] Parallel execution (fork/join)
+- [x] Publication coordination mode (consensus aggregation, event emission, review_from)
+- [ ] Agent steering commands (pause/resume/inject)

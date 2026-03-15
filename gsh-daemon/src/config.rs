@@ -32,7 +32,7 @@ pub struct DaemonConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
-    /// Default provider (anthropic, openai, moonshot, ollama, zhipu, together)
+    /// Default provider (anthropic, openai, moonshot, ollama, zhipu, together, deepseek)
     #[serde(default = "default_provider")]
     pub default_provider: String,
     #[serde(default)]
@@ -51,6 +51,8 @@ pub struct LlmConfig {
     pub mistral: MistralConfig,
     #[serde(default)]
     pub cerebras: CerebrasConfig,
+    #[serde(default)]
+    pub deepseek: DeepSeekConfig,
     /// Maximum tokens in response
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
@@ -192,6 +194,24 @@ impl Default for CerebrasConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeepSeekConfig {
+    /// API key (can also use DEEPSEEK_API_KEY env var)
+    pub api_key: Option<String>,
+    /// Model to use (deepseek-chat or deepseek-reasoner)
+    #[serde(default = "default_deepseek_model")]
+    pub model: String,
+}
+
+impl Default for DeepSeekConfig {
+    fn default() -> Self {
+        Self {
+            api_key: None,
+            model: default_deepseek_model(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     /// Maximum number of shell events to keep
     #[serde(default = "default_max_events")]
@@ -293,6 +313,10 @@ fn default_mistral_model() -> String {
 
 fn default_cerebras_model() -> String {
     "zai-glm-4.7".to_string()
+}
+
+fn default_deepseek_model() -> String {
+    "deepseek-chat".to_string()
 }
 
 fn default_max_events() -> usize {
@@ -416,6 +440,7 @@ impl Default for LlmConfig {
             together: TogetherConfig::default(),
             mistral: MistralConfig::default(),
             cerebras: CerebrasConfig::default(),
+            deepseek: DeepSeekConfig::default(),
             max_tokens: default_max_tokens(),
             system_prompt: None,
         }
@@ -546,6 +571,13 @@ impl Config {
         std::env::var("CEREBRAS_API_KEY")
             .ok()
             .or_else(|| self.llm.cerebras.api_key.clone())
+    }
+
+    /// Get API key for DeepSeek (env var takes priority over config)
+    pub fn deepseek_api_key(&self) -> Option<String> {
+        std::env::var("DEEPSEEK_API_KEY")
+            .ok()
+            .or_else(|| self.llm.deepseek.api_key.clone())
     }
 
     /// Get the session storage directory
